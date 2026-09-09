@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: jigawa-times
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/categories
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # PORT is provided automatically by Render — do not set it manually.
+      - key: DATABASE_URL
+        sync: false   # paste your Neon connection string in the Render dashboard
+      - key: AUTH_SECRET
+        generateValue: true
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+
+# NOTE ON MIGRATIONS: this blueprint intentionally has no migrate/seed step.
+# Render's free Web Service plan gives no shell access after deploy, and
+# `prisma migrate deploy` needs to run against the live database, not just
+# generate code — so the schema is created once by hand, ahead of the first
+# deploy, by pasting /migrations.sql into the Neon SQL Editor. The build
+# command above only runs `prisma generate` (via the `build` npm script),
+# which is pure code generation and touches no database. See README.md.

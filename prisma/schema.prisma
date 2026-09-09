@@ -1,0 +1,147 @@
+// Jigawa Times — Prisma schema
+//
+// IMPORTANT: In production this schema is NOT applied with
+// `prisma migrate deploy` or `prisma db push`. The schema is created
+// manually by running /migrations.sql in the Neon SQL Editor (Render's
+// free Web Service plan has no post-deploy shell access to run migration
+// commands). This file exists only so Prisma Client can be generated
+// (`prisma generate`, a pure code-gen step with no DB connection) and
+// used as the query layer against the tables migrations.sql already
+// created. Keep this file's models in sync with migrations.sql by hand.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  EDITOR
+  REPORTER
+}
+
+enum ArticleStatus {
+  DRAFT
+  SUBMITTED
+  IN_REVIEW
+  REVISION_REQUIRED
+  APPROVED
+  PUBLISHED
+  ARCHIVED
+}
+
+model User {
+  id            Int       @id @default(autoincrement())
+  name          String
+  email         String    @unique
+  passwordHash  String
+  role          UserRole  @default(REPORTER)
+  bio           String?
+  avatar        String?
+  active        Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  articles          Article[]
+  editorialActions  EditorialAction[]
+}
+
+model Category {
+  id          Int       @id @default(autoincrement())
+  name        String
+  slug        String    @unique
+  description String?
+  order       Int       @default(0)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  articles Article[]
+}
+
+model Article {
+  id             Int           @id @default(autoincrement())
+  title          String
+  slug           String        @unique
+  excerpt        String?
+  content        String
+  featuredImage  String?
+  imageCaption   String?
+  status         ArticleStatus @default(DRAFT)
+  isBreaking     Boolean       @default(false)
+  isFeatured     Boolean       @default(false)
+  authorId       Int
+  categoryId     Int
+  views          Int           @default(0)
+  publishedAt    DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  author           User              @relation(fields: [authorId], references: [id])
+  category         Category          @relation(fields: [categoryId], references: [id])
+  tags             ArticleTag[]
+  comments         Comment[]
+  editorialActions EditorialAction[]
+
+  @@index([status])
+  @@index([publishedAt])
+  @@index([categoryId])
+  @@index([authorId])
+  @@index([views])
+}
+
+model Tag {
+  id   Int    @id @default(autoincrement())
+  name String @unique
+  slug String @unique
+
+  articles ArticleTag[]
+}
+
+model ArticleTag {
+  articleId Int
+  tagId     Int
+
+  article Article @relation(fields: [articleId], references: [id], onDelete: Cascade)
+  tag     Tag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([articleId, tagId])
+}
+
+model Comment {
+  id        Int      @id @default(autoincrement())
+  articleId Int
+  name      String
+  email     String
+  content   String
+  approved  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  article Article @relation(fields: [articleId], references: [id], onDelete: Cascade)
+
+  @@index([articleId])
+}
+
+model EditorialAction {
+  id        Int      @id @default(autoincrement())
+  articleId Int
+  userId    Int
+  action    String
+  note      String?
+  createdAt DateTime @default(now())
+
+  article Article @relation(fields: [articleId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@index([articleId])
+}
+
+model SiteSetting {
+  id        Int      @id @default(autoincrement())
+  key       String   @unique
+  value     String
+  updatedAt DateTime @updatedAt
+}

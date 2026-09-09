@@ -1,0 +1,35 @@
+{
+  "name": "jigawa-times",
+  "version": "1.0.0",
+  "description": "Jigawa Times — independent digital newspaper for Buji, Jigawa State and Nigeria. Informing People, Demanding Accountability.",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "dev": "concurrently \"vite\" \"node server.js\"",
+    "build": "vite build && prisma generate",
+    "start": "node server.js",
+    "postinstall": "prisma generate",
+    "db:generate": "prisma generate"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.20.0",
+    "@vitejs/plugin-vue": "^5.1.2",
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.4.0",
+    "jsonwebtoken": "^9.0.2",
+    "prisma": "^5.20.0",
+    "sanitize-html": "^2.13.0",
+    "vite": "^5.4.2",
+    "vue": "^3.4.38",
+    "vue-router": "^4.4.3"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "engines": {
+    "node": ">=18 <23"
+  }
+}
