@@ -4,7 +4,7 @@ import { api } from './api.js';
 import { store } from './store.js';
 import {
   ArticleCard, ArticleListRow, Pagination,
-  ShareButtons, CommentsBlock, ImageUploader,
+  ShareButtons, CommentsBlock, ImageUploader, NewsletterBox,
   DashSidebar, DashTopbar,
   timeAgo, readingTime,
 } from './components.js';
@@ -257,7 +257,7 @@ export const Home = defineComponent({
       </section>
     </div>
   `,
-  components: { ArticleCard, ArticleListRow },
+  components: { ArticleCard, ArticleListRow, NewsletterBox },
 });
 
 // ARTICLE PAGE (The Athletic Broadsheet Reading View)
