@@ -98,54 +98,23 @@ export const SiteHeader = defineComponent({
   setup() {
     const q = ref('');
     const menuOpen = ref(false);
-    const dashLink = computed(() => {
-      if (!store.user) return '/login';
-      if (store.user.role === 'REPORTER') return '/reporter';
-      if (store.user.role === 'EDITOR') return '/editor';
-      return '/admin';
-    });
     const doSearch = (router) => {
       if (!q.value.trim()) return;
       menuOpen.value = false;
       router.push({ path: '/search', query: { q: q.value.trim() } });
       q.value = '';
     };
-    const logout = async (router) => {
-      await store.logout();
-      router.push('/');
-    };
-    return { q, menuOpen, doSearch, logout, NAV_ITEMS, store, dashLink };
+    return { q, menuOpen, doSearch, NAV_ITEMS };
   },
   template: `
     <header class="nyt-header">
-      <!-- Dateline Bar -->
-      <div class="nyt-dateline-bar">
-        <div class="container nyt-dateline-inner">
-          <div class="nyt-dateline-left">
-            <span>{{ new Date().toLocaleDateString('en-NG', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }) }}</span>
-          </div>
-          <div class="nyt-dateline-center">
-            <span class="utility-badge"><i class="fa-solid fa-shield-halved" aria-hidden="true"></i> Independent Journalism</span>
-          </div>
-          <div class="nyt-dateline-right">
-            <template v-if="!store.user">
-              <router-link to="/login" class="staff-portal-btn"><i class="fa-solid fa-user-lock" aria-hidden="true"></i> Newsroom Login</router-link>
-            </template>
-            <template v-else>
-              <router-link :to="dashLink" class="staff-portal-btn active"><i class="fa-solid fa-gauge-high" aria-hidden="true"></i> {{ store.user.name }}</router-link>
-              <button @click="logout($router)" class="logout-link"><i class="fa-solid fa-arrow-right-from-bracket" aria-hidden="true"></i> Sign out</button>
-            </template>
-          </div>
-        </div>
-      </div>
-
       <!-- Masthead -->
       <div class="container nyt-masthead">
         <div class="nyt-masthead-rule"></div>
         <router-link to="/" class="nyt-wordmark-link" aria-label="Jigawa Times home">
           <div class="nyt-wordmark">Jigawa <span class="nyt-accent">Times</span></div>
         </router-link>
-        <div class="nyt-tagline">Informing People &bull; Demanding Accountability</div>
+        <div class="nyt-tagline">ECHOES FROM THE NEW WORLD</div>
         <div class="nyt-masthead-rule"></div>
       </div>
 
@@ -625,47 +594,46 @@ export const DashTopbar = defineComponent({
 // SITE FOOTER
 // -----------------------------------------------------------------------
 export const SiteFooter = defineComponent({
+  setup() {
+    const dashLink = computed(() => {
+      if (!store.user) return '/login';
+      if (store.user.role === 'REPORTER') return '/reporter';
+      if (store.user.role === 'EDITOR') return '/editor';
+      return '/admin';
+    });
+    const logout = async (router) => {
+      await store.logout();
+      router.push('/');
+    };
+    return { store, dashLink, logout };
+  },
   template: `
     <footer class="nyt-footer" aria-label="Site footer">
-      <div class="container">
-        <div class="nyt-footer-top">
-          <div class="nyt-footer-wordmark">Jigawa <span class="nyt-accent">Times</span></div>
-          <div class="nyt-footer-tagline">Informing People &bull; Demanding Accountability</div>
+      <div class="container nyt-footer-inner">
+        <div class="nyt-footer-brand">
+          <router-link to="/" class="nyt-footer-wordmark" aria-label="Jigawa Times home">Jigawa <span class="nyt-accent">Times</span></router-link>
+          <span class="nyt-footer-bullet" aria-hidden="true">&bull;</span>
+          <span class="nyt-footer-tagline">ECHOES FROM THE NEW WORLD</span>
         </div>
-        <div class="nyt-footer-rule"></div>
-        <div class="nyt-footer-grid">
-          <div class="nyt-footer-col">
-            <div class="nyt-footer-col-title">Coverage</div>
-            <router-link to="/category/buji">Buji</router-link>
-            <router-link to="/category/jigawa">Jigawa</router-link>
-            <router-link to="/category/politics">Politics &amp; Governance</router-link>
-            <router-link to="/category/business">Business &amp; Development</router-link>
-            <router-link to="/category/education">Education &amp; Health</router-link>
-            <router-link to="/category/investigations">Investigations &amp; Opinion</router-link>
-          </div>
-          <div class="nyt-footer-col">
-            <div class="nyt-footer-col-title">About</div>
-            <router-link to="/about">About Us</router-link>
-            <router-link to="/editorial-policy">Editorial Policy</router-link>
-            <router-link to="/contact">Contact</router-link>
-          </div>
-          <div class="nyt-footer-col">
-            <div class="nyt-footer-col-title">Legal</div>
-            <router-link to="/privacy">Privacy Policy</router-link>
-            <router-link to="/terms">Terms of Use</router-link>
-          </div>
-          <div class="nyt-footer-col">
-            <div class="nyt-footer-col-title">Stay Informed</div>
-            <newsletter-box></newsletter-box>
-          </div>
-        </div>
-        <div class="nyt-footer-bottom">
-          <span>&copy; {{ new Date().getFullYear() }} Jigawa Times. All rights reserved.</span>
-          <span>Independent Journalism Since 2024</span>
-        </div>
+        <nav class="nyt-footer-links" aria-label="Footer navigation">
+          <router-link to="/category/buji">Buji</router-link>
+          <router-link to="/category/jigawa">Jigawa</router-link>
+          <router-link to="/category/politics">Politics</router-link>
+          <router-link to="/category/investigations">Investigations</router-link>
+          <router-link to="/about">About</router-link>
+          <router-link to="/editorial-policy">Editorial Policy</router-link>
+          <router-link to="/contact">Contact</router-link>
+          <router-link to="/privacy">Privacy</router-link>
+          <span class="nyt-footer-pipe" aria-hidden="true">|</span>
+          <template v-if="!store.user">
+            <router-link to="/login" class="nyt-footer-login"><i class="fa-solid fa-user-lock" aria-hidden="true"></i> Newsroom Login</router-link>
+          </template>
+          <template v-else>
+            <router-link :to="dashLink" class="nyt-footer-login"><i class="fa-solid fa-gauge-high" aria-hidden="true"></i> {{ store.user.name }}</router-link>
+            <button @click="logout($router)" class="nyt-footer-logout"><i class="fa-solid fa-arrow-right-from-bracket" aria-hidden="true"></i> Sign out</button>
+          </template>
+        </nav>
       </div>
     </footer>
   `,
-  components: {},
 });
-SiteFooter.components = { NewsletterBox };
