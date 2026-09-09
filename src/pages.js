@@ -109,150 +109,140 @@ export const Home = defineComponent({
     return { featured, latest, mostRead, buji, jigawa, politics, spotlight, loading, error, hero, heroSide, timeAgo, readingTime };
   },
   template: `
-    <div v-if="loading" class="state-block athletic-loading" style="min-height:60vh;display:flex;align-items:center;justify-content:center;">
+    <!-- Loading -->
+    <div v-if="loading" class="state-block" style="min-height:60vh;display:flex;align-items:center;justify-content:center;">
       <div>
         <div class="state-icon"><i class="fa-solid fa-newspaper" aria-hidden="true"></i></div>
-        <p style="font-family:var(--font-sans);font-weight:600;letter-spacing:0.02em;">Loading Jigawa Times Digital Broadsheet…</p>
+        <p style="font-family:var(--font-sans);font-weight:500;letter-spacing:0.02em;">Loading Jigawa Times…</p>
       </div>
     </div>
 
+    <!-- Error -->
     <div v-else-if="error || (!hero && !latest.length)" class="state-block container" style="min-height:60vh;display:flex;flex-direction:column;align-items:center;justify-content:center;">
       <div class="state-icon"><i class="fa-solid fa-triangle-exclamation" aria-hidden="true" style="color:var(--accent);"></i></div>
-      <h2 style="font-family:var(--font-serif);font-size:1.8rem;">Newsroom Service Connecting…</h2>
-      <p>Our server is updating data. Please refresh in a moment or explore categories directly.</p>
-      <button class="btn accent" @click="window.location.reload()"><i class="fa-solid fa-rotate" aria-hidden="true"></i> Reload Page</button>
+      <h2 style="font-family:var(--font-display);font-size:1.6rem;">Unable to Load Stories</h2>
+      <p>Our server is updating. Please refresh in a moment.</p>
+      <button class="btn accent" @click="window.location.reload()"><i class="fa-solid fa-rotate" aria-hidden="true"></i> Reload</button>
     </div>
 
-    <div v-else class="athletic-home-wrap">
-      <!-- THE ATHLETIC HERO SHOWCASE -->
-      <div class="container hero-container">
-        <section class="hero athletic-hero" v-if="hero" aria-label="Lead Story">
-          <!-- Hero Main Lead -->
-          <div class="hero-main athletic-lead-card">
-            <router-link :to="'/news/'+hero.slug" class="hero-main-img" aria-label="Read lead story">
+    <!-- Main Content -->
+    <div v-else class="nyt-home">
+
+      <!-- ════ HERO BROADSHEET ════ -->
+      <div class="container nyt-hero">
+        <div class="nyt-hero-grid" v-if="hero">
+          <!-- Lead Story -->
+          <div class="nyt-hero-lead">
+            <router-link :to="'/news/'+hero.slug" class="nyt-hero-lead-media">
               <img v-if="hero.featuredImage" :src="hero.featuredImage" :alt="hero.imageCaption||hero.title" />
-              <div v-else class="hero-main-img-placeholder"><i class="fa-solid fa-newspaper" aria-hidden="true"></i></div>
-              <span class="hero-lead-badge"><i class="fa-solid fa-star" aria-hidden="true"></i> LEAD REPORT</span>
+              <div v-else class="nyt-img-placeholder"><i class="fa-solid fa-newspaper" aria-hidden="true"></i></div>
             </router-link>
-            
-            <div class="hero-lead-content">
-              <div class="eyebrow-row">
-                <span class="cat-pill" v-if="hero.category?.name">{{ hero.category.name }}</span>
-                <span class="read-chip"><i class="fa-regular fa-clock" aria-hidden="true"></i> {{ readingTime(hero.content) }} min read</span>
-              </div>
-              
-              <h1><router-link :to="'/news/'+hero.slug">{{ hero.title }}</router-link></h1>
-              <p class="excerpt" v-if="hero.excerpt">{{ hero.excerpt }}</p>
-              
-              <div class="byline hero-byline">
-                <div class="author-chip-lg" v-if="hero.author?.name">
-                  <span class="author-avatar-chip">{{ hero.author.name[0] }}</span>
-                  <span class="author-name">{{ hero.author.name }}</span>
-                </div>
-                <span class="byline-dot">&bull;</span>
-                <span class="time-text">{{ timeAgo(hero.publishedAt) }}</span>
-              </div>
+            <div class="nyt-hero-lead-kicker" v-if="hero.category?.name">{{ hero.category.name }}</div>
+            <h1 class="nyt-hero-lead-headline"><router-link :to="'/news/'+hero.slug">{{ hero.title }}</router-link></h1>
+            <p class="nyt-hero-lead-summary" v-if="hero.excerpt">{{ hero.excerpt }}</p>
+            <div class="nyt-hero-lead-byline">
+              <span class="nyt-author-name" v-if="hero.author?.name">By {{ hero.author.name }}</span>
+              <span class="nyt-byline-sep">&bull;</span>
+              <span class="nyt-time-text">{{ timeAgo(hero.publishedAt) }}</span>
+              <span class="nyt-byline-sep">&bull;</span>
+              <span class="nyt-time-text">{{ readingTime(hero.content) }} min read</span>
             </div>
           </div>
 
-          <!-- Hero Side Ranked List -->
-          <div class="hero-side athletic-hero-side" aria-label="Top stories">
-            <div class="hero-side-header">
-              <h3><i class="fa-solid fa-fire" aria-hidden="true" style="color:var(--accent);margin-right:6px;"></i> Top Headlines</h3>
-            </div>
-            <div class="hero-side-item" v-for="(a, i) in heroSide" :key="a.id">
-              <div class="hero-side-num" aria-hidden="true">0{{ i+1 }}</div>
-              <div class="hero-side-body">
-                <div class="eyebrow-mini" v-if="a.category?.name">{{ a.category.name }}</div>
-                <h3><router-link :to="'/news/'+a.slug">{{ a.title }}</router-link></h3>
-                <div class="byline-sm">
-                  <span>{{ timeAgo(a.publishedAt) }}</span>
-                  <span>&bull;</span>
-                  <span>{{ readingTime(a.content) }}m read</span>
+          <!-- Vertical Rule -->
+          <div class="nyt-col-rule"></div>
+
+          <!-- Secondary Stories -->
+          <div class="nyt-hero-col">
+            <div class="nyt-hero-story" v-for="(a, i) in heroSide" :key="a.id">
+              <div class="nyt-hero-story-row">
+                <div class="nyt-hero-story-text">
+                  <div class="nyt-hero-story-kicker" v-if="a.category?.name">{{ a.category.name }}</div>
+                  <h3 class="nyt-hero-story-headline"><router-link :to="'/news/'+a.slug">{{ a.title }}</router-link></h3>
+                  <div class="nyt-hero-story-byline">
+                    <span>{{ timeAgo(a.publishedAt) }}</span>
+                    <span>&bull;</span>
+                    <span>{{ readingTime(a.content) }}m read</span>
+                  </div>
                 </div>
+                <img v-if="a.featuredImage" :src="a.featuredImage" :alt="a.title" class="nyt-hero-story-img" />
               </div>
             </div>
           </div>
-        </section>
+        </div>
       </div>
 
-      <!-- INVESTIGATIVE SPOTLIGHT BANNER -->
-      <section class="investigative-spotlight-section" v-if="spotlight">
-        <div class="container">
-          <div class="spotlight-card">
-            <div class="spotlight-badge"><i class="fa-solid fa-magnifying-glass-chart" aria-hidden="true"></i> INVESTIGATIVE DEEP DIVE</div>
-            <div class="spotlight-grid">
-              <div class="spotlight-info">
-                <h2><router-link :to="'/news/'+spotlight.slug">{{ spotlight.title }}</router-link></h2>
-                <p class="spotlight-excerpt" v-if="spotlight.excerpt">{{ spotlight.excerpt }}</p>
-                <div class="spotlight-byline">
-                  <span>By {{ spotlight.author?.name || 'Jigawa Times Investigation Unit' }}</span>
-                  <span>&bull;</span>
-                  <span><i class="fa-regular fa-clock" aria-hidden="true"></i> {{ readingTime(spotlight.content) }} min investigative read</span>
-                </div>
-                <router-link :to="'/news/'+spotlight.slug" class="btn accent lg spotlight-btn">
-                  Read Full Investigation <i class="fa-solid fa-arrow-right" aria-hidden="true"></i>
-                </router-link>
-              </div>
-              <div class="spotlight-media" v-if="spotlight.featuredImage">
-                <img :src="spotlight.featuredImage" :alt="spotlight.title" />
-              </div>
-            </div>
-          </div>
+      <!-- ════ LATEST NEWS ════ -->
+      <section class="nyt-section container" aria-labelledby="latest-head">
+        <div class="nyt-section-header">
+          <h2 class="nyt-section-label" id="latest-head">Latest News</h2>
         </div>
-      </section>
-
-      <!-- LATEST NEWS GRID -->
-      <section class="section container" aria-labelledby="latest-head">
-        <div class="section-head athletic-section-head">
-          <h2 id="latest-head">Latest Coverage</h2>
-          <span class="section-subtitle">Real-time reporting across Buji &amp; Jigawa State</span>
-        </div>
-        <div class="card-grid athletic-card-grid">
+        <div class="nyt-stories-grid">
           <article-card v-for="a in latest.slice(0, 6)" :key="a.id" :article="a" />
         </div>
       </section>
 
-      <!-- MOST READ / TRENDING -->
-      <section class="section container" v-if="mostRead.length" aria-labelledby="mostread-head">
-        <div class="section-head athletic-section-head">
-          <h2 id="mostread-head">Most Read This Week</h2>
-          <span class="section-subtitle">Most read reports &amp; commentary</span>
+      <!-- ════ MOST READ ════ -->
+      <section class="nyt-section container" v-if="mostRead.length" aria-labelledby="mostread-head">
+        <div class="nyt-section-header">
+          <h2 class="nyt-section-label" id="mostread-head">Most Read This Week</h2>
         </div>
-        <div class="most-read-grid">
+        <div class="nyt-ranked-list">
           <article-list-row v-for="(a, i) in mostRead.slice(0, 5)" :key="a.id" :article="a" :rank="i+1" />
         </div>
       </section>
 
-      <!-- BUJI LOCAL GOVERNMENT -->
-      <section class="section container" v-if="buji.length" aria-labelledby="buji-head">
-        <div class="section-head athletic-section-head">
-          <h2 id="buji-head"><i class="fa-solid fa-location-dot" aria-hidden="true" style="color:var(--accent);margin-right:6px;"></i> Buji LGA Focus</h2>
-          <router-link to="/category/buji" class="see-all">Explore Buji Coverage <i class="fa-solid fa-arrow-right" aria-hidden="true"></i></router-link>
+      <!-- ════ INVESTIGATIVE SPOTLIGHT ════ -->
+      <section class="nyt-spotlight" v-if="spotlight">
+        <div class="container">
+          <div class="nyt-spotlight-label"><i class="fa-solid fa-magnifying-glass-chart" aria-hidden="true"></i> Investigation</div>
+          <div class="nyt-spotlight-grid">
+            <div class="nyt-spotlight-text">
+              <h2 class="nyt-spotlight-headline"><router-link :to="'/news/'+spotlight.slug">{{ spotlight.title }}</router-link></h2>
+              <p class="nyt-spotlight-summary" v-if="spotlight.excerpt">{{ spotlight.excerpt }}</p>
+              <div class="nyt-spotlight-byline">
+                <span>By {{ spotlight.author?.name || 'Investigation Unit' }}</span>
+                <span>&bull;</span>
+                <span>{{ readingTime(spotlight.content) }} min read</span>
+              </div>
+              <router-link :to="'/news/'+spotlight.slug" class="btn accent">Read Full Investigation <i class="fa-solid fa-arrow-right" aria-hidden="true"></i></router-link>
+            </div>
+            <div class="nyt-spotlight-media" v-if="spotlight.featuredImage">
+              <img :src="spotlight.featuredImage" :alt="spotlight.title" />
+            </div>
+          </div>
         </div>
-        <div class="card-grid athletic-card-grid"><article-card v-for="a in buji" :key="a.id" :article="a" /></div>
       </section>
 
-      <!-- JIGAWA STATE -->
-      <section class="section container" v-if="jigawa.length" aria-labelledby="jigawa-head">
-        <div class="section-head athletic-section-head">
-          <h2 id="jigawa-head">Jigawa State Affairs</h2>
-          <router-link to="/category/jigawa" class="see-all">All State News <i class="fa-solid fa-arrow-right" aria-hidden="true"></i></router-link>
+      <!-- ════ BUJI LGA ════ -->
+      <section class="nyt-section container" v-if="buji.length" aria-labelledby="buji-head">
+        <div class="nyt-section-header">
+          <h2 class="nyt-section-label" id="buji-head">Buji LGA</h2>
+          <router-link to="/category/buji" class="nyt-section-more">More Coverage <i class="fa-solid fa-arrow-right" aria-hidden="true"></i></router-link>
         </div>
-        <div class="card-grid athletic-card-grid"><article-card v-for="a in jigawa" :key="a.id" :article="a" /></div>
+        <div class="nyt-stories-grid"><article-card v-for="a in buji" :key="a.id" :article="a" /></div>
       </section>
 
-      <!-- POLITICS & GOVERNANCE -->
-      <section class="section container" v-if="politics.length" aria-labelledby="politics-head">
-        <div class="section-head athletic-section-head">
-          <h2 id="politics-head">Politics &amp; Governance</h2>
-          <router-link to="/category/politics" class="see-all">All Governance Stories <i class="fa-solid fa-arrow-right" aria-hidden="true"></i></router-link>
+      <!-- ════ JIGAWA STATE ════ -->
+      <section class="nyt-section container" v-if="jigawa.length" aria-labelledby="jigawa-head">
+        <div class="nyt-section-header">
+          <h2 class="nyt-section-label" id="jigawa-head">Jigawa State</h2>
+          <router-link to="/category/jigawa" class="nyt-section-more">More Coverage <i class="fa-solid fa-arrow-right" aria-hidden="true"></i></router-link>
         </div>
-        <div class="card-grid athletic-card-grid"><article-card v-for="a in politics" :key="a.id" :article="a" /></div>
+        <div class="nyt-stories-grid"><article-card v-for="a in jigawa" :key="a.id" :article="a" /></div>
       </section>
 
-      <!-- NEWSLETTER BANNER -->
-      <section class="container" style="margin-bottom:var(--s12);">
+      <!-- ════ POLITICS & GOVERNANCE ════ -->
+      <section class="nyt-section container" v-if="politics.length" aria-labelledby="politics-head">
+        <div class="nyt-section-header">
+          <h2 class="nyt-section-label" id="politics-head">Politics &amp; Governance</h2>
+          <router-link to="/category/politics" class="nyt-section-more">More Coverage <i class="fa-solid fa-arrow-right" aria-hidden="true"></i></router-link>
+        </div>
+        <div class="nyt-stories-grid"><article-card v-for="a in politics" :key="a.id" :article="a" /></div>
+      </section>
+
+      <!-- ════ NEWSLETTER ════ -->
+      <section class="container" style="padding:32px 0;">
         <newsletter-box></newsletter-box>
       </section>
     </div>

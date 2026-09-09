@@ -117,61 +117,55 @@ export const SiteHeader = defineComponent({
     return { q, menuOpen, doSearch, logout, NAV_ITEMS, store, dashLink };
   },
   template: `
-    <header class="site-header athletic-header">
-      <!-- Utility Top Bar -->
-      <div class="utility-bar">
-        <div class="container utility-inner">
-          <div class="utility-left">
-            <span class="utility-date">
-              <i class="fa-regular fa-calendar-check" aria-hidden="true" style="margin-right:6px;color:var(--accent);"></i>
-              {{ new Date().toLocaleDateString('en-NG', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }) }}
-            </span>
+    <header class="nyt-header">
+      <!-- Dateline Bar -->
+      <div class="nyt-dateline-bar">
+        <div class="container nyt-dateline-inner">
+          <div class="nyt-dateline-left">
+            <span>{{ new Date().toLocaleDateString('en-NG', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }) }}</span>
+          </div>
+          <div class="nyt-dateline-center">
             <span class="utility-badge"><i class="fa-solid fa-shield-halved" aria-hidden="true"></i> Independent Journalism</span>
           </div>
-          <div class="utility-links">
+          <div class="nyt-dateline-right">
             <template v-if="!store.user">
               <router-link to="/login" class="staff-portal-btn"><i class="fa-solid fa-user-lock" aria-hidden="true"></i> Newsroom Login</router-link>
             </template>
             <template v-else>
-              <router-link :to="dashLink" class="staff-portal-btn active"><i class="fa-solid fa-gauge-high" aria-hidden="true"></i> {{ store.user.name }} ({{ store.user.role }})</router-link>
+              <router-link :to="dashLink" class="staff-portal-btn active"><i class="fa-solid fa-gauge-high" aria-hidden="true"></i> {{ store.user.name }}</router-link>
               <button @click="logout($router)" class="logout-link"><i class="fa-solid fa-arrow-right-from-bracket" aria-hidden="true"></i> Sign out</button>
             </template>
           </div>
         </div>
       </div>
 
-      <!-- Main Masthead -->
-      <div class="container masthead">
-        <router-link to="/" class="wordmark-link" aria-label="Jigawa Times home">
-          <div class="brand-badge-wrap">
-            <div class="brand-crest">JT</div>
-            <div>
-              <div class="wordmark">JIGAWA <span class="voice">TIMES</span></div>
-              <div class="tagline">Informing People &bull; Demanding Accountability</div>
-            </div>
-          </div>
+      <!-- Masthead -->
+      <div class="container nyt-masthead">
+        <div class="nyt-masthead-rule"></div>
+        <router-link to="/" class="nyt-wordmark-link" aria-label="Jigawa Times home">
+          <div class="nyt-wordmark">Jigawa <span class="nyt-accent">Times</span></div>
         </router-link>
-
-        <form class="search-box" @submit.prevent="doSearch($router)">
-          <i class="fa-solid fa-magnifying-glass search-icon" aria-hidden="true"></i>
-          <input type="search" v-model="q" placeholder="Search investigative reports, politics, Buji…" aria-label="Search Jigawa Times" />
-          <button class="btn accent sm" type="submit">Search</button>
-        </form>
+        <div class="nyt-tagline">Informing People &bull; Demanding Accountability</div>
+        <div class="nyt-masthead-rule"></div>
       </div>
 
-      <!-- Athletic Primary Navigation -->
-      <nav class="primary-nav" aria-label="Primary navigation">
-        <div class="container nav-container">
-          <div class="nav-links" :class="{ 'nav-open': menuOpen }">
-            <div v-if="menuOpen" class="mobile-nav-head">
-              <div class="wordmark" style="font-size:1.2rem;">JIGAWA <span class="voice">TIMES</span></div>
+      <!-- Navigation -->
+      <nav class="nyt-nav" aria-label="Primary navigation">
+        <div class="container nyt-nav-inner">
+          <div class="nyt-nav-links" :class="{ 'nyt-nav-open': menuOpen }">
+            <div v-if="menuOpen" class="nyt-mobile-nav-head">
+              <div class="nyt-wordmark" style="font-size:1.2rem;">Jigawa <span class="nyt-accent">Times</span></div>
               <button @click="menuOpen=false" aria-label="Close navigation" class="close-nav-btn"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
             </div>
-            <router-link v-for="[label, path] in NAV_ITEMS" :key="path" :to="path" @click="menuOpen=false">
+            <router-link v-for="[label, path] in NAV_ITEMS" :key="path" :to="path" class="nyt-nav-link" @click="menuOpen=false">
               {{ label }}
             </router-link>
           </div>
-          <button class="nav-toggle" @click="menuOpen=!menuOpen" :aria-expanded="menuOpen" aria-label="Toggle navigation menu">
+          <form class="nyt-search-form" @submit.prevent="doSearch($router)">
+            <input type="search" v-model="q" placeholder="Search…" class="nyt-search-input" aria-label="Search Jigawa Times" />
+            <button class="nyt-search-btn" type="submit" aria-label="Search"><i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i></button>
+          </form>
+          <button class="nyt-nav-toggle" @click="menuOpen=!menuOpen" :aria-expanded="menuOpen" aria-label="Toggle navigation menu">
             <i :class="menuOpen ? 'fa-solid fa-xmark' : 'fa-solid fa-bars'" aria-hidden="true"></i>
           </button>
         </div>
@@ -186,13 +180,13 @@ export const SiteHeader = defineComponent({
 export const BreakingTicker = defineComponent({
   props: { items: { type: Array, default: () => [] } },
   template: `
-    <div class="ticker-wrap" v-if="items.length" role="marquee" aria-label="Breaking news">
-      <div class="ticker-inner">
-        <span class="ticker-label" aria-hidden="true"><i class="fa-solid fa-bolt" style="font-size:10px;"></i> BREAKING</span>
-        <div class="ticker-track">
-          <div class="ticker-items">
-            <router-link v-for="a in items" :key="'a'+a.id" :to="'/news/'+a.slug"><span class="ticker-dot">•</span> {{ a.title }}</router-link>
-            <router-link v-for="a in items" :key="'b'+a.id" :to="'/news/'+a.slug" aria-hidden="true"><span class="ticker-dot">•</span> {{ a.title }}</router-link>
+    <div class="nyt-ticker" v-if="items.length" role="marquee" aria-label="Breaking news">
+      <div class="container nyt-ticker-inner">
+        <span class="nyt-ticker-label"><i class="fa-solid fa-bolt" style="font-size:10px;"></i> BREAKING</span>
+        <div class="nyt-ticker-track">
+          <div class="nyt-ticker-items">
+            <router-link v-for="a in items" :key="'a'+a.id" :to="'/news/'+a.slug"><span class="nyt-ticker-dot">•</span> {{ a.title }}</router-link>
+            <router-link v-for="a in items" :key="'b'+a.id" :to="'/news/'+a.slug" aria-hidden="true"><span class="nyt-ticker-dot">•</span> {{ a.title }}</router-link>
           </div>
         </div>
       </div>
@@ -207,25 +201,20 @@ export const ArticleCard = defineComponent({
   props: { article: Object },
   setup() { return { timeAgo, readingTime }; },
   template: `
-    <article class="card athletic-card">
-      <router-link :to="'/news/'+article.slug" class="card-img" tabindex="-1">
+    <article class="nyt-story">
+      <router-link :to="'/news/'+article.slug" class="nyt-story-media" tabindex="-1">
         <img v-if="article.featuredImage" :src="article.featuredImage" :alt="article.imageCaption||article.title" loading="lazy" />
-        <div v-else class="card-img-placeholder"><i class="fa-solid fa-newspaper" aria-hidden="true"></i></div>
-        <span class="card-cat-badge" v-if="article.category?.name">{{ article.category.name }}</span>
+        <div v-else class="nyt-img-placeholder"><i class="fa-solid fa-newspaper" aria-hidden="true"></i></div>
       </router-link>
-      <div class="card-body">
-        <h3><router-link :to="'/news/'+article.slug">{{ article.title }}</router-link></h3>
-        <p class="excerpt" v-if="article.excerpt">{{ article.excerpt }}</p>
-        <div class="byline">
-          <div class="author-chip-sm" v-if="article.author?.name">
-            <span class="author-avatar-mini">{{ article.author.name[0] }}</span>
-            <span class="author-name-text">{{ article.author.name }}</span>
-          </div>
-          <div class="meta-right">
-            <span><i class="fa-regular fa-clock" aria-hidden="true"></i> {{ timeAgo(article.publishedAt) }}</span>
-            <span>&bull;</span>
-            <span>{{ readingTime(article.content) }}m read</span>
-          </div>
+      <div class="nyt-story-body">
+        <div class="nyt-story-kicker" v-if="article.category?.name">{{ article.category.name }}</div>
+        <h3 class="nyt-story-headline"><router-link :to="'/news/'+article.slug">{{ article.title }}</router-link></h3>
+        <p class="nyt-story-summary" v-if="article.excerpt">{{ article.excerpt }}</p>
+        <div class="nyt-story-byline">
+          <span class="nyt-story-author-avatar" v-if="article.author?.name">{{ article.author.name[0] }}</span>
+          <span class="nyt-author-name" v-if="article.author?.name">{{ article.author.name }}</span>
+          <span class="nyt-byline-sep">&bull;</span>
+          <span class="nyt-time-text">{{ timeAgo(article.publishedAt) }}</span>
         </div>
       </div>
     </article>
@@ -239,18 +228,16 @@ export const ArticleListRow = defineComponent({
   props: { article: Object, rank: Number },
   setup() { return { timeAgo, readingTime }; },
   template: `
-    <div class="list-row athletic-list-row">
-      <div v-if="rank" class="list-row-rank" aria-hidden="true">{{ rank < 10 ? '0' + rank : rank }}</div>
-      <img v-if="article.featuredImage" class="list-row-img" :src="article.featuredImage" :alt="article.title" loading="lazy" />
-      <div class="list-row-body">
-        <div class="eyebrow" v-if="article.category?.name">{{ article.category.name }}</div>
-        <h3><router-link :to="'/news/'+article.slug">{{ article.title }}</router-link></h3>
-        <div class="byline">
+    <div class="nyt-ranked-item">
+      <div v-if="rank" class="nyt-rank-num" aria-hidden="true">{{ rank }}</div>
+      <img v-if="article.featuredImage" class="nyt-ranked-img" :src="article.featuredImage" :alt="article.title" loading="lazy" />
+      <div class="nyt-ranked-body">
+        <div class="nyt-ranked-kicker" v-if="article.category?.name">{{ article.category.name }}</div>
+        <h3 class="nyt-ranked-headline"><router-link :to="'/news/'+article.slug">{{ article.title }}</router-link></h3>
+        <div class="nyt-ranked-byline">
           <span v-if="article.author?.name">{{ article.author.name }}</span>
           <span v-if="article.author?.name">&bull;</span>
           <span>{{ timeAgo(article.publishedAt) }}</span>
-          <span>&bull;</span>
-          <span>{{ readingTime(article.content) }}m read</span>
         </div>
       </div>
     </div>
@@ -297,23 +284,23 @@ export const NewsletterBox = defineComponent({
     return { email, state, submit };
   },
   template: `
-    <div class="newsletter-athletic-card">
-      <div class="newsletter-head">
-        <i class="fa-solid fa-envelope-open-text newsletter-icon" aria-hidden="true"></i>
-        <div>
-          <h4>Inside Jigawa’s Newsroom</h4>
-          <p>Get exclusive investigative stories and daily intelligence briefs delivered to your inbox.</p>
+    <div class="nyt-newsletter">
+      <div class="nyt-newsletter-inner">
+        <i class="fa-solid fa-envelope-open-text nyt-newsletter-icon" aria-hidden="true"></i>
+        <div class="nyt-newsletter-text">
+          <h4>The Jigawa Times Briefing</h4>
+          <p>Investigative stories and daily intelligence delivered to your inbox.</p>
         </div>
+        <form class="nyt-newsletter-form" @submit.prevent="submit" v-if="state !== 'done'">
+          <input type="email" v-model="email" required placeholder="Your email address" aria-label="Email address for newsletter" />
+          <button class="btn accent sm" type="submit" :disabled="state==='loading'">
+            <i :class="state==='loading' ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-arrow-right'" aria-hidden="true"></i>
+            {{ state==='loading' ? 'Subscribing…' : 'Subscribe' }}
+          </button>
+        </form>
+        <p v-else class="nyt-newsletter-success"><i class="fa-solid fa-circle-check" aria-hidden="true"></i> You're subscribed. Thank you.</p>
       </div>
-      <form class="newsletter-form" @submit.prevent="submit" v-if="state !== 'done'">
-        <input type="email" v-model="email" required placeholder="Enter your email address…" aria-label="Email address for newsletter" />
-        <button class="newsletter-cta btn accent" type="submit" :disabled="state==='loading'">
-          <i :class="state==='loading' ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-paper-plane'" aria-hidden="true"></i>
-          {{ state==='loading' ? 'Subscribing…' : 'Subscribe Free' }}
-        </button>
-      </form>
-      <p v-else class="newsletter-success"><i class="fa-solid fa-circle-check" aria-hidden="true"></i> You're subscribed! Thank you for supporting independent journalism.</p>
-      <p v-if="state==='error'" class="newsletter-err"><i class="fa-solid fa-circle-exclamation" aria-hidden="true"></i> Something went wrong. Please try again.</p>
+      <p v-if="state==='error'" class="nyt-newsletter-error"><i class="fa-solid fa-circle-exclamation" aria-hidden="true"></i> Something went wrong. Please try again.</p>
     </div>
   `,
 });
@@ -639,19 +626,16 @@ export const DashTopbar = defineComponent({
 // -----------------------------------------------------------------------
 export const SiteFooter = defineComponent({
   template: `
-    <footer class="site-footer" aria-label="Site footer">
+    <footer class="nyt-footer" aria-label="Site footer">
       <div class="container">
-        <div class="footer-grid">
-          <!-- Brand column -->
-          <div>
-            <div class="footer-wordmark">JIGAWA <span class="voice">TIMES</span></div>
-            <p class="footer-desc">Independent digital newsroom covering Buji LGA, Jigawa State and Nigeria &mdash; governance, accountability and community life.</p>
-            <newsletter-box></newsletter-box>
-          </div>
-
-          <!-- Coverage -->
-          <div class="footer-col">
-            <div class="footer-col-title">Coverage</div>
+        <div class="nyt-footer-top">
+          <div class="nyt-footer-wordmark">Jigawa <span class="nyt-accent">Times</span></div>
+          <div class="nyt-footer-tagline">Informing People &bull; Demanding Accountability</div>
+        </div>
+        <div class="nyt-footer-rule"></div>
+        <div class="nyt-footer-grid">
+          <div class="nyt-footer-col">
+            <div class="nyt-footer-col-title">Coverage</div>
             <router-link to="/category/buji">Buji</router-link>
             <router-link to="/category/jigawa">Jigawa</router-link>
             <router-link to="/category/politics">Politics &amp; Governance</router-link>
@@ -659,26 +643,25 @@ export const SiteFooter = defineComponent({
             <router-link to="/category/education">Education &amp; Health</router-link>
             <router-link to="/category/investigations">Investigations &amp; Opinion</router-link>
           </div>
-
-          <!-- About -->
-          <div class="footer-col">
-            <div class="footer-col-title">About</div>
+          <div class="nyt-footer-col">
+            <div class="nyt-footer-col-title">About</div>
             <router-link to="/about">About Us</router-link>
             <router-link to="/editorial-policy">Editorial Policy</router-link>
             <router-link to="/contact">Contact</router-link>
           </div>
-
-          <!-- Legal -->
-          <div class="footer-col">
-            <div class="footer-col-title">Legal</div>
+          <div class="nyt-footer-col">
+            <div class="nyt-footer-col-title">Legal</div>
             <router-link to="/privacy">Privacy Policy</router-link>
             <router-link to="/terms">Terms of Use</router-link>
           </div>
+          <div class="nyt-footer-col">
+            <div class="nyt-footer-col-title">Stay Informed</div>
+            <newsletter-box></newsletter-box>
+          </div>
         </div>
-
-        <div class="footer-bottom">
+        <div class="nyt-footer-bottom">
           <span>&copy; {{ new Date().getFullYear() }} Jigawa Times. All rights reserved.</span>
-          <span>Informing People, Demanding Accountability.</span>
+          <span>Independent Journalism Since 2024</span>
         </div>
       </div>
     </footer>
