@@ -756,14 +756,22 @@ app.post('/api/newsroom/items/:id/reject', requireAuth, requireRole('ADMIN', 'ED
   res.json({ item: updated });
 });
 
+// GET /api/newsroom/logs — retrieve recent in-memory newsroom logs for live admin dashboard
+app.get('/api/newsroom/logs', requireAuth, requireRole('ADMIN', 'EDITOR'), (req, res) => {
+  const logger = require('./newsroom/logger.js');
+  res.json({ logs: logger.getRecentLogs() });
+});
+
 // POST /api/newsroom/run — manually trigger one newsroom scan cycle (ADMIN only)
 app.post('/api/newsroom/run', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  const logger = require('./newsroom/logger.js');
   if (!newsroom) {
+    logger.error('Manual run requested but AI Newsroom is not loaded.');
     return res.status(503).json({ error: 'AI Newsroom is not configured. Check server logs and environment variables.' });
   }
-  // Run asynchronously — respond immediately so the HTTP request doesn't time out
-  res.json({ ok: true, message: 'Newsroom scan started. Check server logs for progress.' });
-  newsroom.runNewsroom().catch((err) => console.error('[NEWSROOM] Manual run error:', err.message));
+  logger.info(`Manual scan initiated from Admin UI by ${req.user.email}`);
+  res.json({ ok: true, message: 'Newsroom scan started. Check server logs or live terminal below.' });
+  newsroom.runNewsroom().catch((err) => logger.error('Manual run failed:', err.message));
 });
 
 // ---------------------------------------------------------------------

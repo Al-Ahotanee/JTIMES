@@ -47,8 +47,8 @@ const config = Object.freeze({
   // Default: true — must be explicitly disabled for real publishing.
   dryRun: optionalBool('NEWSROOM_DRY_RUN', true),
 
-  // How often the scheduler runs (0 = disabled; run manually only)
-  intervalMinutes: optionalInt('NEWSROOM_INTERVAL_MINUTES', 0),
+  // How often the scheduler runs (default: 30 minutes)
+  intervalMinutes: optionalInt('NEWSROOM_INTERVAL_MINUTES', 30),
 
   // Max concurrent AI requests in-flight at once
   concurrency: optionalInt('NEWSROOM_CONCURRENCY', 2),
@@ -58,7 +58,7 @@ const config = Object.freeze({
   // -----------------------------------------------------------------------
   aiProvider: optional('AI_PROVIDER', 'gemini'),
   geminiApiKey: optional('GEMINI_API_KEY'),
-  geminiModel: optional('GEMINI_MODEL', 'gemini-2.0-flash'),
+  geminiModel: optional('GEMINI_MODEL', 'gemini-3.6-flash'),
 
   // Optional fallback (not implemented in v1, reserved for future use)
   aisFallbackProvider: optional('AI_FALLBACK_PROVIDER'),
@@ -73,9 +73,8 @@ const config = Object.freeze({
   // -----------------------------------------------------------------------
   // Existing Jigawa Times API
   // -----------------------------------------------------------------------
-  // Base URL of the existing JT backend (same-process calls when running
-  // inside server.js; external URL when running as a standalone script).
-  apiUrl: optional('EXISTING_API_URL', 'http://localhost:3000'),
+  // Base URL of the existing JT backend (adapts to Render's PORT).
+  apiUrl: optional('EXISTING_API_URL', `http://127.0.0.1:${process.env.PORT || 3000}`),
 
   // A valid JWT for the newsroom author account. Generate once:
   //   POST /api/auth/login  { email, password }  → copy the jt_token cookie value

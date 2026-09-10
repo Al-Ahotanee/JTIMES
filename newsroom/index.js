@@ -14,13 +14,14 @@
 //   1. Fetch all RSS sources
 //   2. Deduplicate against known items + recent articles
 //   3. For each new story: classify → verify → write → image → publish
-//   4. Persist newsroom_items status to the DB via the JT API
-//   5. Log a summary
+//   4. Persist newsroom_items status to the DB via Prisma or API
+//   5. Log a structured summary to console and in-memory buffer
 
 'use strict';
 
 const config  = require('./config.js');
 const SOURCES = require('./sources.js');
+const logger  = require('./logger.js');
 const {
   discoverStories,
   deduplicateItems,
@@ -29,11 +30,31 @@ const {
   fetchUrl,
 } = require('./agent.js');
 
+let prismaClient = null;
+try {
+  const { PrismaClient } = require('@prisma/client');
+  prismaClient = new PrismaClient();
+} catch {}
+
 // ---------------------------------------------------------------------------
-// Fetch helpers for existing JT API (read-only — no write operations here)
+// Database / API helpers (Prisma first, HTTP fallback)
 // ---------------------------------------------------------------------------
 
 async function getRecentArticles(apiUrl, token) {
+  if (prismaClient) {
+    try {
+      const rows = await prismaClient.article.findMany({
+        where: { status: 'PUBLISHED' },
+        select: { id: true, title: true, excerpt: true },
+        orderBy: { publishedAt: 'desc' },
+        take: 50,
+      });
+      return rows.map((a) => ({ id: a.id, title: a.title, excerpt: a.excerpt || '' }));
+    } catch (e) {
+      logger.warn(`Prisma recent articles query failed, falling back to HTTP: ${e.message}`);
+    }
+  }
+
   try {
     const url  = `${apiUrl}/api/articles?pageSize=50&status=PUBLISHED`;
     const data = await fetchUrl(url, {
@@ -43,12 +64,24 @@ async function getRecentArticles(apiUrl, token) {
     const parsed = JSON.parse(data);
     return (parsed.items || []).map((a) => ({ id: a.id, title: a.title, excerpt: a.excerpt || '' }));
   } catch (err) {
-    console.warn(`[NEWSROOM] Could not fetch recent articles: ${err.message}`);
+    logger.warn(`Could not fetch recent articles: ${err.message}`);
     return [];
   }
 }
 
 async function getKnownHashes(apiUrl, token) {
+  if (prismaClient) {
+    try {
+      const rows = await prismaClient.newsroomItem.findMany({
+        select: { contentHash: true },
+        take: 1000,
+      });
+      return rows.map((i) => ({ content_hash: i.contentHash }));
+    } catch (e) {
+      logger.warn(`Prisma known hashes query failed, falling back to HTTP: ${e.message}`);
+    }
+  }
+
   try {
     const url  = `${apiUrl}/api/newsroom/items?pageSize=500`;
     const data = await fetchUrl(url, {
@@ -58,12 +91,39 @@ async function getKnownHashes(apiUrl, token) {
     const parsed = JSON.parse(data);
     return (parsed.items || []).map((i) => ({ content_hash: i.content_hash }));
   } catch (err) {
-    console.warn(`[NEWSROOM] Could not fetch known newsroom hashes: ${err.message}`);
+    logger.warn(`Could not fetch known newsroom hashes: ${err.message}`);
     return [];
   }
 }
 
 async function saveNewsroomItem(apiUrl, token, item, status, articleId) {
+  if (prismaClient) {
+    try {
+      await prismaClient.newsroomItem.upsert({
+        where: { sourceUrl: item.sourceUrl },
+        update: { status, articleId: articleId || null },
+        create: {
+          sourceUrl:     item.sourceUrl,
+          sourceName:    item.sourceName,
+          sourceTitle:   item.title || null,
+          contentHash:   item.contentHash || null,
+          status:        status || 'DISCOVERED',
+          category:      item.category || null,
+          reviewRequired: status === 'PENDING_REVIEW',
+          articleId:     articleId || null,
+          rawData:       {
+            region:      item.region,
+            publishedAt: item.publishedAt,
+            imageUrl:    item.imageUrl,
+          },
+        },
+      });
+      return;
+    } catch (e) {
+      logger.warn(`Prisma save newsroom item failed, trying HTTP: ${e.message}`);
+    }
+  }
+
   try {
     const url  = `${apiUrl}/api/newsroom/items`;
     const body = JSON.stringify({
@@ -107,8 +167,7 @@ async function saveNewsroomItem(apiUrl, token, item, status, articleId) {
       req.end();
     });
   } catch (err) {
-    // Non-fatal — just log; the article was already created
-    console.warn(`[NEWSROOM] Could not save newsroom item for "${item.title}": ${err.message}`);
+    logger.warn(`Could not save newsroom item for "${item.title}": ${err.message}`);
   }
 }
 
@@ -140,18 +199,18 @@ async function runWithConcurrency(tasks, limit, onItem) {
  */
 async function runNewsroom() {
   const startTime = Date.now();
-  console.log('[NEWSROOM] ════════════════════════════════════════');
-  console.log(`[NEWSROOM] Scan started at ${new Date().toISOString()}`);
-  console.log(`[NEWSROOM] Mode: ${config.mode} | Dry-run: ${config.dryRun}`);
-  console.log('[NEWSROOM] ════════════════════════════════════════');
+  logger.info('════════════════════════════════════════');
+  logger.info(`Scan started at ${new Date().toISOString()}`);
+  logger.info(`Mode: ${config.mode} | Dry-run: ${config.dryRun} | Model: ${config.geminiModel}`);
+  logger.info('════════════════════════════════════════');
 
   // --- Check AI is configured ---
   let aiClient;
   try {
     aiClient = createAiClient(config);
   } catch (err) {
-    console.error(`[NEWSROOM] AI client init failed: ${err.message}`);
-    console.error('[NEWSROOM] Set AI_PROVIDER and the corresponding API key in .env');
+    logger.error(`AI client init failed: ${err.message}`);
+    logger.error('Please set GEMINI_API_KEY in your environment variables.');
     return { error: err.message };
   }
 
@@ -159,10 +218,10 @@ async function runNewsroom() {
 
   // --- Stage 1: Discover ---
   const { items: rawItems, stats: discoverStats } = await discoverStories(SOURCES);
-  console.log(`[NEWSROOM] ${rawItems.length} stories discovered from ${discoverStats.sourcesAttempted} sources (${discoverStats.sourcesFailed} failed)`);
+  logger.info(`${rawItems.length} stories discovered from ${discoverStats.sourcesAttempted} sources (${discoverStats.sourcesFailed} unreachable)`);
 
   if (rawItems.length === 0) {
-    console.log('[NEWSROOM] No stories found. Exiting.');
+    logger.warn('No stories found from configured RSS sources. Exiting scan.');
     return { discovered: 0, processed: 0, published: 0, failed: 0 };
   }
 
@@ -172,17 +231,16 @@ async function runNewsroom() {
     getRecentArticles(config.apiUrl, token),
   ]);
 
-  // Cheap dedup: hash + keyword overlap (before calling AI)
   const { unique: candidates, duplicatesSkipped: cheapDupes } = await deduplicateItems(
     rawItems,
     knownHashes,
     recentArticles,
     async () => false  // AI semantic dedup handled inside processStory
   );
-  console.log(`[NEWSROOM] ${cheapDupes} duplicates skipped (hash/keyword); ${candidates.length} candidates to analyse`);
+  logger.info(`${cheapDupes} duplicates skipped (hash/keyword); ${candidates.length} candidate stories to analyse`);
 
   if (candidates.length === 0) {
-    console.log('[NEWSROOM] All stories are duplicates or already seen. Done.');
+    logger.info('All discovered stories are already in the system. Scan complete.');
     return { discovered: rawItems.length, duplicatesSkipped: cheapDupes, processed: 0, published: 0 };
   }
 
@@ -191,24 +249,38 @@ async function runNewsroom() {
 
   await runWithConcurrency(candidates, config.concurrency, async (item) => {
     stats.processed++;
-    console.log(`[NEWSROOM] Processing (${stats.processed}/${candidates.length}): ${item.title}`);
+    logger.info(`Analyzing (${stats.processed}/${candidates.length}): "${item.title.slice(0, 60)}..." [${item.sourceName}]`);
 
     const result = await processStory(item, aiClient, config, recentArticles);
 
     switch (result.status) {
-      case 'PUBLISHED':     stats.published++;     break;
-      case 'SUBMITTED':     stats.pendingReview++; break;
-      case 'DRAFT':         stats.pendingReview++; break;
-      case 'PENDING_REVIEW':stats.pendingReview++; break;
-      case 'SKIPPED':       stats.skipped++;       break;
-      case 'DUPLICATE':     stats.skipped++;       break;
-      case 'DRY_RUN':       stats.dryRun++;        break;
+      case 'PUBLISHED':
+        stats.published++;
+        logger.info(`[PUBLISHED] Story created & published: ${item.title}`);
+        break;
+      case 'SUBMITTED':
+      case 'DRAFT':
+      case 'PENDING_REVIEW':
+        stats.pendingReview++;
+        logger.info(`[PENDING REVIEW] Story prepared for editor review: ${item.title}`);
+        break;
+      case 'SKIPPED':
+      case 'DUPLICATE':
+        stats.skipped++;
+        break;
+      case 'DRY_RUN':
+        stats.dryRun++;
+        logger.info(`[DRY RUN] Article prepared (not published): ${item.title}`);
+        break;
       case 'FAILED':
-      default:              stats.failed++;         break;
+      default:
+        stats.failed++;
+        logger.warn(`[FAILED] Processing failed for: ${item.title} (${result.reason || 'unknown'})`);
+        break;
     }
 
-    // Persist to newsroom_items (non-fatal if it fails)
-    if (!config.dryRun && token) {
+    // Persist to newsroom_items
+    if (!config.dryRun) {
       await saveNewsroomItem(config.apiUrl, token, item, result.status, result.articleId);
     }
 
@@ -216,17 +288,11 @@ async function runNewsroom() {
   });
 
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-  console.log('[NEWSROOM] ════════════════════════════════════════');
-  console.log(`[NEWSROOM] Scan complete in ${elapsed}s`);
-  console.log(`[NEWSROOM] ${rawItems.length} stories discovered`);
-  console.log(`[NEWSROOM] ${cheapDupes} duplicates skipped`);
-  console.log(`[NEWSROOM] ${candidates.length} stories sent to AI`);
-  console.log(`[NEWSROOM] ${stats.skipped} stories skipped (not news / semantic dupe)`);
-  console.log(`[NEWSROOM] ${stats.published} articles published`);
-  console.log(`[NEWSROOM] ${stats.pendingReview} require editorial review`);
-  console.log(`[NEWSROOM] ${stats.dryRun} articles prepared (dry-run — not published)`);
-  console.log(`[NEWSROOM] ${stats.failed} failures`);
-  console.log('[NEWSROOM] ════════════════════════════════════════');
+  logger.info('════════════════════════════════════════');
+  logger.info(`Scan complete in ${elapsed}s`);
+  logger.info(`Discovered: ${rawItems.length} | Duplicates skipped: ${cheapDupes}`);
+  logger.info(`Analyzed: ${candidates.length} | Published: ${stats.published} | Review Required: ${stats.pendingReview} | Dry Run: ${stats.dryRun} | Failed: ${stats.failed}`);
+  logger.info('════════════════════════════════════════');
 
   return { discovered: rawItems.length, duplicatesSkipped: cheapDupes, ...stats };
 }
@@ -239,23 +305,28 @@ let _schedulerTimer = null;
 
 /**
  * Start the periodic newsroom scheduler.
- * Runs immediately once, then repeats every NEWSROOM_INTERVAL_MINUTES.
+ * Runs immediately once after a short 5s startup delay, then repeats every NEWSROOM_INTERVAL_MINUTES.
  * Call this from server.js after app.listen().
  */
 function startScheduler() {
   const minutes = config.intervalMinutes;
   if (!minutes || minutes <= 0) {
-    console.log('[NEWSROOM] Scheduler disabled (NEWSROOM_INTERVAL_MINUTES=0 or not set). Use `npm run newsroom` to run manually.');
+    logger.info('Scheduler disabled (NEWSROOM_INTERVAL_MINUTES=0). Use `npm run newsroom` or UI to run manually.');
     return;
   }
 
   const ms = minutes * 60 * 1000;
-  console.log(`[NEWSROOM] Scheduler starting — runs every ${minutes} minute(s)`);
+  logger.info(`Scheduler started — scheduled to run every ${minutes} minute(s)`);
 
-  // Run immediately on startup, then on interval
-  runNewsroom().catch((err) => console.error('[NEWSROOM] Scheduler run error:', err.message));
+  // Delay initial run by 5s so server completes port binding
+  setTimeout(() => {
+    logger.info('Starting initial background news scan on server boot...');
+    runNewsroom().catch((err) => logger.error('Initial news scan error:', err.message));
+  }, 5000);
+
   _schedulerTimer = setInterval(() => {
-    runNewsroom().catch((err) => console.error('[NEWSROOM] Scheduler run error:', err.message));
+    logger.info('Starting scheduled background news scan...');
+    runNewsroom().catch((err) => logger.error('Scheduled news scan error:', err.message));
   }, ms);
 }
 
@@ -266,7 +337,7 @@ function stopScheduler() {
   if (_schedulerTimer) {
     clearInterval(_schedulerTimer);
     _schedulerTimer = null;
-    console.log('[NEWSROOM] Scheduler stopped.');
+    logger.info('Scheduler stopped.');
   }
 }
 
@@ -276,14 +347,10 @@ module.exports = { runNewsroom, startScheduler, stopScheduler };
 // CLI entry point: node newsroom/index.js
 // ---------------------------------------------------------------------------
 if (require.main === module) {
-  // When run directly, force-load .env if dotenv is available
   try {
-    // Attempt to load dotenv from project root (optional dev dependency)
     const path = require('path');
     require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-  } catch {
-    // dotenv not installed — rely on env vars already being set
-  }
+  } catch {}
 
   runNewsroom()
     .then((summary) => {
@@ -291,7 +358,7 @@ if (require.main === module) {
       process.exit(0);
     })
     .catch((err) => {
-      console.error('[NEWSROOM] Fatal error:', err.message);
+      logger.error('Fatal newsroom error:', err.message);
       process.exit(1);
     });
 }

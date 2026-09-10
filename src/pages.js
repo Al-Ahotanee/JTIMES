@@ -1094,10 +1094,19 @@ export const AdminNewsroom = defineComponent({
   setup() {
     const items       = ref([]);
     const stats       = ref({ discovered: 0, pending_review: 0, generated: 0, published: 0, failed: 0, rejected: 0 });
+    const logs        = ref([]);
     const statusFilter = ref('');
     const loading     = ref(true);
     const running     = ref(false);
     const error       = ref('');
+    let logPollTimer  = null;
+
+    const fetchLogs = async () => {
+      try {
+        const res = await api.get('/api/newsroom/logs');
+        logs.value = res.logs || [];
+      } catch {}
+    };
 
     const load = async () => {
       loading.value = true;
@@ -1117,6 +1126,7 @@ export const AdminNewsroom = defineComponent({
           failed:        statsRes.failed        || 0,
           rejected:      statsRes.rejected      || 0,
         };
+        await fetchLogs();
       } catch (e) {
         error.value = e.message || 'Failed to load newsroom data.';
       } finally {
@@ -1124,7 +1134,16 @@ export const AdminNewsroom = defineComponent({
       }
     };
 
-    onMounted(load);
+    onMounted(() => {
+      load();
+      // Periodically refresh logs
+      logPollTimer = setInterval(fetchLogs, 5000);
+    });
+
+    onUnmounted(() => {
+      if (logPollTimer) clearInterval(logPollTimer);
+    });
+
     watch(statusFilter, load);
 
     const approve = async (item) => {
@@ -1146,18 +1165,19 @@ export const AdminNewsroom = defineComponent({
     const runNow = async () => {
       running.value = true;
       try {
-        await api.post('/api/newsroom/run');
-        alert('Newsroom scan started. Refresh in a minute to see new items.');
+        const res = await api.post('/api/newsroom/run');
+        alert(res.message || 'Newsroom scan started. Check the live terminal below.');
+        await fetchLogs();
       } catch (e) {
         alert(e.message || 'Could not start newsroom scan. Is GEMINI_API_KEY set?');
       } finally {
-        running.value = false;
+        setTimeout(() => { running.value = false; load(); }, 4000);
       }
     };
 
     const statusLabel = (s) => (s || '').replace(/_/g, ' ');
 
-    return { items, stats, statusFilter, loading, running, error, approve, reject, runNow, statusLabel, timeAgo };
+    return { items, stats, logs, statusFilter, loading, running, error, approve, reject, runNow, statusLabel, fetchLogs, timeAgo };
   },
   template: `
     <dash-shell title="AI Newsroom">
@@ -1289,6 +1309,25 @@ export const AdminNewsroom = defineComponent({
             </tr>
           </tbody>
         </table>
+      </div>
+
+      <!-- Live Newsroom Logs Terminal -->
+      <div style="margin-top:var(--s6);background:#181825;color:#cdd6f4;border-radius:var(--r-md);padding:var(--s4);font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;box-shadow:var(--shadow-sm);border:1px solid #313244;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s2);border-bottom:1px solid #313244;padding-bottom:var(--s2);">
+          <span style="font-weight:bold;color:#89b4fa;display:flex;align-items:center;gap:6px;">
+            <i class="fa-solid fa-terminal" aria-hidden="true"></i> Live Execution Terminal
+            <span v-if="running" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#a6e3a1;animation:pulse 1.5s infinite;"></span>
+          </span>
+          <button class="btn ghost" style="color:#a6adc8;font-size:11px;padding:2px 8px;border:1px solid #45475a;" @click="fetchLogs" title="Refresh logs">
+            <i class="fa-solid fa-rotate-right" aria-hidden="true"></i> Refresh Logs
+          </button>
+        </div>
+        <div style="max-height:220px;overflow-y:auto;line-height:1.6;">
+          <div v-if="!logs.length" style="color:#6c7086;font-style:italic;">No logs recorded yet. The scheduler will run every 30m, or click 'Run Now' above.</div>
+          <div v-for="(l, i) in logs" :key="i" :style="{color: l.level === 'error' ? '#f38ba8' : l.level === 'warn' ? '#f9e2af' : '#a6e3a1', padding:'1px 0'}">
+            <span style="color:#6c7086;">[{{ l.time ? l.time.split('T')[1].slice(0,8) : '' }}]</span> {{ l.message }}
+          </div>
+        </div>
       </div>
 
       <!-- AI disclosure note -->
