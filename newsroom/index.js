@@ -237,19 +237,28 @@ async function runNewsroom() {
     recentArticles,
     async () => false  // AI semantic dedup handled inside processStory
   );
-  logger.info(`${cheapDupes} duplicates skipped (hash/keyword); ${candidates.length} candidate stories to analyse`);
+  logger.info(`${cheapDupes} duplicates skipped (hash/keyword); ${candidates.length} candidate stories available`);
 
   if (candidates.length === 0) {
     logger.info('All discovered stories are already in the system. Scan complete.');
     return { discovered: rawItems.length, duplicatesSkipped: cheapDupes, processed: 0, published: 0 };
   }
 
+  // Prioritize candidates: Jigawa first, then Nigeria, then World
+  const regionWeights = { jigawa: 1, nigeria: 2, world: 3 };
+  candidates.sort((a, b) => (regionWeights[a.region] || 2) - (regionWeights[b.region] || 2));
+
+  // Limit candidates per run to avoid hitting Gemini free-tier rate limits
+  const maxStories = config.maxItemsPerRun || 8;
+  const prioritizedCandidates = candidates.slice(0, maxStories);
+  logger.info(`Selected top ${prioritizedCandidates.length} stories for this scan (Jigawa prioritized) from ${candidates.length} candidates`);
+
   // --- Stages 3–8: Process candidates with controlled concurrency ---
   const stats = { processed: 0, published: 0, pendingReview: 0, skipped: 0, failed: 0, dryRun: 0 };
 
-  await runWithConcurrency(candidates, config.concurrency, async (item) => {
+  await runWithConcurrency(prioritizedCandidates, config.concurrency, async (item) => {
     stats.processed++;
-    logger.info(`Analyzing (${stats.processed}/${candidates.length}): "${item.title.slice(0, 60)}..." [${item.sourceName}]`);
+    logger.info(`Analyzing (${stats.processed}/${prioritizedCandidates.length}): "${item.title.slice(0, 60)}..." [${item.sourceName}]`);
 
     const result = await processStory(item, aiClient, config, recentArticles);
 

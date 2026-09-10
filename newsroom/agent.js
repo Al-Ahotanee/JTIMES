@@ -376,7 +376,12 @@ function createAiClient(config) {
     let activeVersion = 'v1beta';
     let modelDiscoveryAttempted = false;
 
-    const callGemini = async (prompt, retries = 2) => {
+    // Rate-limit safety: space requests out by at least 4.2 seconds
+    // to strictly respect the Gemini free-tier quota (15 requests/min)
+    let lastRequestTime = 0;
+    const MIN_INTERVAL_MS = 4200;
+
+    const callGemini = async (prompt, retries = 3) => {
       const body = JSON.stringify({
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
         generationConfig: { temperature: 0.2 },
@@ -384,6 +389,13 @@ function createAiClient(config) {
       const data = Buffer.from(body);
 
       for (let attempt = 0; attempt <= retries; attempt++) {
+        // Enforce minimum delay between calls
+        const timeSinceLast = Date.now() - lastRequestTime;
+        if (timeSinceLast < MIN_INTERVAL_MS) {
+          await new Promise((r) => setTimeout(r, MIN_INTERVAL_MS - timeSinceLast));
+        }
+        lastRequestTime = Date.now();
+
         try {
           const modelPath = `/${activeVersion}/models/${activeModel}:generateContent`;
           const result = await new Promise((resolve, reject) => {
@@ -402,7 +414,13 @@ function createAiClient(config) {
               res.on('data', (c) => chunks.push(c));
               res.on('end', () => {
                 const text = Buffer.concat(chunks).toString();
-                if (res.statusCode === 429 || res.statusCode >= 500) {
+                if (res.statusCode === 429) {
+                  return reject(Object.assign(new Error(`Gemini HTTP 429: Rate limit reached`), {
+                    retryable: true,
+                    isRateLimit: true,
+                  }));
+                }
+                if (res.statusCode >= 500) {
                   return reject(Object.assign(new Error(`Gemini HTTP ${res.statusCode}`), { retryable: true }));
                 }
                 if (res.statusCode === 404) {
@@ -449,8 +467,9 @@ function createAiClient(config) {
           }
 
           if (attempt < retries && err.retryable) {
-            const delay = Math.pow(2, attempt) * 1500;
-            logger.warn(`Gemini retry ${attempt + 1}/${retries} in ${delay}ms: ${err.message}`);
+            // For 429 rate limits, wait 15s / 30s to let the minute window reset
+            const delay = err.isRateLimit ? (attempt + 1) * 15000 : Math.pow(2, attempt) * 2000;
+            logger.warn(`Gemini ${err.isRateLimit ? 'rate limit (429)' : 'transient error'} retry ${attempt + 1}/${retries} in ${Math.round(delay / 1000)}s`);
             await new Promise((r) => setTimeout(r, delay));
           } else {
             throw err;

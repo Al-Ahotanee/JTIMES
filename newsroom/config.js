@@ -50,8 +50,13 @@ const config = Object.freeze({
   // How often the scheduler runs (default: 30 minutes)
   intervalMinutes: optionalInt('NEWSROOM_INTERVAL_MINUTES', 30),
 
-  // Max concurrent AI requests in-flight at once
-  concurrency: optionalInt('NEWSROOM_CONCURRENCY', 2),
+  // Max stories to analyze per scan cycle (default: 8)
+  // Keeps AI requests within the free-tier rate limit (15 requests/min)
+  // and prioritizes the most important Jigawa State stories first.
+  maxItemsPerRun: optionalInt('NEWSROOM_MAX_ITEMS_PER_RUN', 8),
+
+  // Max concurrent AI requests in-flight at once (default: 1)
+  concurrency: optionalInt('NEWSROOM_CONCURRENCY', 1),
 
   // -----------------------------------------------------------------------
   // AI provider
