@@ -1087,6 +1087,222 @@ export const AdminComments = defineComponent({
 });
 
 // -----------------------------------------------------------------------
+// AI NEWSROOM ADMIN PAGE
+// -----------------------------------------------------------------------
+
+export const AdminNewsroom = defineComponent({
+  setup() {
+    const items       = ref([]);
+    const stats       = ref({ discovered: 0, pending_review: 0, generated: 0, published: 0, failed: 0, rejected: 0 });
+    const statusFilter = ref('');
+    const loading     = ref(true);
+    const running     = ref(false);
+    const error       = ref('');
+
+    const load = async () => {
+      loading.value = true;
+      error.value   = '';
+      try {
+        const q = statusFilter.value ? `&status=${statusFilter.value}` : '';
+        const [itemsRes, statsRes] = await Promise.all([
+          api.get(`/api/newsroom/items?pageSize=50${q}`),
+          api.get('/api/newsroom/stats'),
+        ]);
+        items.value = itemsRes.items || [];
+        stats.value = {
+          discovered:    statsRes.discovered    || 0,
+          pending_review: statsRes.pending_review || 0,
+          generated:     statsRes.generated     || 0,
+          published:     statsRes.published     || 0,
+          failed:        statsRes.failed        || 0,
+          rejected:      statsRes.rejected      || 0,
+        };
+      } catch (e) {
+        error.value = e.message || 'Failed to load newsroom data.';
+      } finally {
+        loading.value = false;
+      }
+    };
+
+    onMounted(load);
+    watch(statusFilter, load);
+
+    const approve = async (item) => {
+      if (!confirm(`Approve and publish: "${item.sourceTitle || item.sourceName}"?`)) return;
+      try {
+        await api.post(`/api/newsroom/items/${item.id}/approve`);
+        load();
+      } catch (e) { alert(e.message); }
+    };
+
+    const reject = async (item) => {
+      if (!confirm(`Reject this item? Its linked article (if any) will be archived.`)) return;
+      try {
+        await api.post(`/api/newsroom/items/${item.id}/reject`);
+        load();
+      } catch (e) { alert(e.message); }
+    };
+
+    const runNow = async () => {
+      running.value = true;
+      try {
+        await api.post('/api/newsroom/run');
+        alert('Newsroom scan started. Refresh in a minute to see new items.');
+      } catch (e) {
+        alert(e.message || 'Could not start newsroom scan. Is GEMINI_API_KEY set?');
+      } finally {
+        running.value = false;
+      }
+    };
+
+    const statusLabel = (s) => (s || '').replace(/_/g, ' ');
+
+    return { items, stats, statusFilter, loading, running, error, approve, reject, runNow, statusLabel, timeAgo };
+  },
+  template: `
+    <dash-shell title="AI Newsroom">
+      <!-- Stats row -->
+      <div class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr));margin-bottom:var(--s6);">
+        <div class="stat-card">
+          <div class="stat-value">{{ stats.discovered }}</div>
+          <div class="stat-label"><i class="fa-solid fa-satellite-dish" aria-hidden="true"></i> Discovered</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--amber);">{{ stats.pending_review }}</div>
+          <div class="stat-label"><i class="fa-solid fa-hourglass-half" aria-hidden="true"></i> Pending Review</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--accent);">{{ stats.generated }}</div>
+          <div class="stat-label"><i class="fa-solid fa-file-pen" aria-hidden="true"></i> Generated</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--green);">{{ stats.published }}</div>
+          <div class="stat-label"><i class="fa-solid fa-cloud-arrow-up" aria-hidden="true"></i> Published</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--red);">{{ stats.failed }}</div>
+          <div class="stat-label"><i class="fa-solid fa-circle-xmark" aria-hidden="true"></i> Failed</div>
+        </div>
+      </div>
+
+      <!-- Toolbar -->
+      <div class="filter-bar" style="display:flex;align-items:flex-end;gap:var(--s4);margin-bottom:var(--s5);flex-wrap:wrap;">
+        <div class="field" style="margin:0;flex:1;min-width:160px;">
+          <label for="nr-status-filter"><i class="fa-solid fa-filter" aria-hidden="true"></i> Filter by status</label>
+          <select id="nr-status-filter" v-model="statusFilter">
+            <option value="">All statuses</option>
+            <option v-for="s in ['DISCOVERED','ANALYZING','PENDING_REVIEW','GENERATED','PUBLISHED','FAILED','REJECTED']" :key="s" :value="s">{{ statusLabel(s) }}</option>
+          </select>
+        </div>
+        <div style="display:flex;gap:var(--s3);padding-bottom:1px;">
+          <button class="btn ghost" @click="load" :disabled="loading" title="Refresh">
+            <i :class="loading ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-rotate-right'" aria-hidden="true"></i>
+            Refresh
+          </button>
+          <button class="btn accent" @click="runNow" :disabled="running">
+            <i :class="running ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-robot'" aria-hidden="true"></i>
+            {{ running ? 'Starting…' : 'Run Now' }}
+          </button>
+        </div>
+      </div>
+
+      <!-- Error -->
+      <div v-if="error" class="form-error" style="margin-bottom:var(--s4);">
+        <i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i> {{ error }}
+      </div>
+
+      <!-- Items table -->
+      <div v-if="loading" class="state-block">
+        <div class="state-icon"><i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i></div>
+        <p>Loading newsroom items&hellip;</p>
+      </div>
+      <div v-else-if="!items.length" class="state-block">
+        <div class="state-icon" style="color:var(--ink-4);"><i class="fa-solid fa-robot" aria-hidden="true"></i></div>
+        <h2>No items yet</h2>
+        <p>Click <strong>Run Now</strong> to start the first newsroom scan, or run <code>npm run newsroom</code> from the terminal.</p>
+        <p style="font-size:var(--text-xs);color:var(--ink-4);margin-top:var(--s2);">Make sure <code>GEMINI_API_KEY</code> and <code>NEWSROOM_API_TOKEN</code> are set in your environment.</p>
+      </div>
+      <div v-else class="table-wrap">
+        <table aria-label="Newsroom items">
+          <thead>
+            <tr>
+              <th>Story</th>
+              <th>Source</th>
+              <th>Status</th>
+              <th>Category</th>
+              <th>Review?</th>
+              <th>Discovered</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="item in items" :key="item.id">
+              <td class="td-title" style="max-width:260px;">
+                <a :href="item.sourceUrl" target="_blank" rel="noopener noreferrer" :title="item.sourceTitle || item.sourceName">
+                  {{ item.sourceTitle || item.sourceName }}
+                </a>
+                <div v-if="item.article" style="margin-top:3px;">
+                  <router-link :to="'/news/'+item.article.slug" target="_blank" style="font-size:var(--text-xs);color:var(--accent);">
+                    <i class="fa-solid fa-newspaper" aria-hidden="true"></i> View article
+                  </router-link>
+                </div>
+              </td>
+              <td class="muted" style="font-size:var(--text-xs);">{{ item.sourceName }}</td>
+              <td><span :class="'badge status-'+(item.status==='PENDING_REVIEW'?'IN_REVIEW':item.status==='PUBLISHED'?'PUBLISHED':item.status==='FAILED'?'ARCHIVED':'DRAFT')">{{ statusLabel(item.status) }}</span></td>
+              <td class="muted" style="font-size:var(--text-xs);">{{ item.category || '—' }}</td>
+              <td>
+                <span v-if="item.reviewRequired" style="color:var(--amber);font-size:var(--text-xs);font-weight:700;">
+                  <i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i> Yes
+                </span>
+                <span v-else style="color:var(--ink-4);font-size:var(--text-xs);">—</span>
+              </td>
+              <td class="muted" style="white-space:nowrap;font-size:var(--text-xs);">{{ timeAgo(item.createdAt) }}</td>
+              <td>
+                <div class="action-btns">
+                  <button
+                    v-if="['PENDING_REVIEW','GENERATED','DRAFT'].includes(item.status)"
+                    class="icon-btn success"
+                    @click="approve(item)"
+                    title="Approve & Publish"
+                    aria-label="Approve and publish this item">
+                    <i class="fa-solid fa-check" aria-hidden="true"></i>
+                  </button>
+                  <button
+                    v-if="!['PUBLISHED','REJECTED'].includes(item.status)"
+                    class="icon-btn danger"
+                    @click="reject(item)"
+                    title="Reject"
+                    aria-label="Reject this item">
+                    <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+                  </button>
+                  <a
+                    v-if="item.article"
+                    class="icon-btn"
+                    :href="'/reporter/edit/'+item.article.id"
+                    target="_blank"
+                    title="Edit article"
+                    aria-label="Edit linked article">
+                    <i class="fa-solid fa-pen" aria-hidden="true"></i>
+                  </a>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- AI disclosure note -->
+      <p style="font-size:var(--text-xs);color:var(--ink-4);margin-top:var(--s5);line-height:1.6;">
+        <i class="fa-solid fa-robot" aria-hidden="true"></i>
+        Articles generated by the AI Newsroom are prepared from publicly available sources.
+        All articles require editorial review before publication. High-risk stories (deaths, allegations, unconfirmed breaking news) are always flagged for manual review.
+      </p>
+    </dash-shell>
+  `,
+  components: { DashShell },
+});
+
+// -----------------------------------------------------------------------
 // EDITOR DASHBOARD
 // -----------------------------------------------------------------------
 

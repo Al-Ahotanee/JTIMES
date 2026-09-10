@@ -20,6 +20,7 @@ const routes = [
   { path: '/admin/users', component: P.AdminUsers, meta: { roles: ['ADMIN'] } },
   { path: '/admin/categories', component: P.AdminCategories, meta: { roles: ['ADMIN'] } },
   { path: '/admin/comments', component: P.AdminComments, meta: { roles: ['ADMIN'] } },
+  { path: '/admin/newsroom', component: P.AdminNewsroom, meta: { roles: ['ADMIN'] } },
 
   { path: '/editor', component: P.EditorQueue, meta: { roles: ['ADMIN', 'EDITOR'] } },
   { path: '/editor/comments', component: P.AdminComments, meta: { roles: ['ADMIN', 'EDITOR'] } },

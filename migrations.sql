@@ -314,8 +314,50 @@ INSERT INTO "SiteSetting" (key, value) VALUES
   ('social_whatsapp', '')
 ON CONFLICT (key) DO NOTHING;
 
+-- ---------------------------------------------------------------------
+-- 11. AI NEWSROOM: newsroom_items tracking table
+-- Stores discovered source stories with their processing status.
+-- The article_id column links back to the Article table once an article
+-- is created. review_required flags stories that need human approval.
+-- This is the ONLY new table introduced by the AI Newsroom feature.
+-- All article data continues to live in the existing "Article" table.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS "newsroom_items" (
+  id               SERIAL PRIMARY KEY,
+  source_url       TEXT NOT NULL UNIQUE,
+  source_name      TEXT NOT NULL,
+  source_title     TEXT,
+  content_hash     TEXT,
+  status           TEXT NOT NULL DEFAULT 'DISCOVERED',
+  category         TEXT,
+  review_required  BOOLEAN NOT NULL DEFAULT FALSE,
+  article_id       INTEGER REFERENCES "Article"(id) ON DELETE SET NULL,
+  verification     JSONB,
+  raw_data         JSONB,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Indexes for fast status filtering and hash deduplication
+CREATE INDEX IF NOT EXISTS idx_newsroom_status  ON "newsroom_items"(status);
+CREATE INDEX IF NOT EXISTS idx_newsroom_hash    ON "newsroom_items"(content_hash);
+CREATE INDEX IF NOT EXISTS idx_newsroom_article ON "newsroom_items"(article_id) WHERE article_id IS NOT NULL;
+
+-- Auto-update updated_at on any row change
+CREATE OR REPLACE FUNCTION update_newsroom_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN NEW.updated_at = now(); RETURN NEW; END;
+$$ LANGUAGE plpgsql;
+
+DO $$ BEGIN
+  CREATE TRIGGER trg_newsroom_updated_at
+  BEFORE UPDATE ON "newsroom_items"
+  FOR EACH ROW EXECUTE FUNCTION update_newsroom_updated_at();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 -- =====================================================================
 -- DONE. Verify with:
 --   SELECT role, count(*) FROM "User" GROUP BY role;
 --   SELECT status, count(*) FROM "Article" GROUP BY status;
+--   SELECT count(*) FROM "newsroom_items";
 -- =====================================================================

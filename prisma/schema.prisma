@@ -85,6 +85,7 @@ model Article {
   tags             ArticleTag[]
   comments         Comment[]
   editorialActions EditorialAction[]
+  newsroomItems    NewsroomItem[]
 
   @@index([status])
   @@index([publishedAt])
@@ -144,4 +145,29 @@ model SiteSetting {
   key       String   @unique
   value     String
   updatedAt DateTime @updatedAt
+}
+
+// AI Newsroom tracking table.
+// Stores discovered source stories and their pipeline processing status.
+// article_id links to the Article created from this story (if any).
+model NewsroomItem {
+  id             Int       @id @default(autoincrement())
+  sourceUrl      String    @unique @map("source_url")
+  sourceName     String    @map("source_name")
+  sourceTitle    String?   @map("source_title")
+  contentHash    String?   @map("content_hash")
+  status         String    @default("DISCOVERED")
+  category       String?
+  reviewRequired Boolean   @default(false) @map("review_required")
+  articleId      Int?      @map("article_id")
+  verification   Json?
+  rawData        Json?     @map("raw_data")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  article Article? @relation(fields: [articleId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([contentHash])
+  @@map("newsroom_items")
 }

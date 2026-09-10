@@ -16,6 +16,14 @@ const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 const app = express();
 
+// AI Newsroom — loaded lazily so missing env vars don't crash the main server
+let newsroom = null;
+try {
+  newsroom = require('./newsroom/index.js');
+} catch (err) {
+  console.warn('[SERVER] AI Newsroom could not be loaded:', err.message);
+}
+
 const AUTH_SECRET = process.env.AUTH_SECRET;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const IS_PROD = NODE_ENV === 'production';
@@ -621,6 +629,144 @@ app.get('/robots.txt', (req, res) => {
 });
 
 // ---------------------------------------------------------------------
+// AI NEWSROOM API
+// All routes require ADMIN or EDITOR authentication.
+// These routes reuse existing auth middleware — no second auth system.
+// ---------------------------------------------------------------------
+
+// GET /api/newsroom/items — list newsroom_items with optional status filter
+app.get('/api/newsroom/items', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
+  const { status, pageSize: ps, page: pg } = req.query;
+  const pageSize = Math.min(Math.max(parseInt(ps) || 20, 1), 100);
+  const page     = Math.max(parseInt(pg) || 1, 1);
+  const where    = status ? { status } : {};
+  const [items, total] = await Promise.all([
+    prisma.newsroomItem.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+      include: { article: { select: { id: true, title: true, slug: true, status: true } } },
+    }),
+    prisma.newsroomItem.count({ where }),
+  ]);
+  res.json({ items, page, pageSize, total, totalPages: Math.ceil(total / pageSize) || 1 });
+});
+
+// GET /api/newsroom/stats — headline counts for the admin dashboard
+app.get('/api/newsroom/stats', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
+  const statuses = ['DISCOVERED', 'ANALYZING', 'PENDING_REVIEW', 'GENERATED', 'PUBLISHED', 'FAILED', 'REJECTED'];
+  const counts   = await Promise.all(
+    statuses.map((s) => prisma.newsroomItem.count({ where: { status: s } }))
+  );
+  const result = Object.fromEntries(statuses.map((s, i) => [s.toLowerCase(), counts[i]]));
+  res.json(result);
+});
+
+// POST /api/newsroom/items — create/record a newsroom item (called by newsroom pipeline)
+app.post('/api/newsroom/items', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
+  const { source_url, source_name, source_title, content_hash, status, category, article_id, review_required, verification, raw_data } = req.body || {};
+  if (!source_url || !source_name) return res.status(400).json({ error: 'source_url and source_name are required.' });
+  const item = await prisma.newsroomItem.upsert({
+    where: { sourceUrl: source_url },
+    update: { status: status || 'DISCOVERED', articleId: article_id || null, verification: verification || undefined, rawData: raw_data || undefined },
+    create: {
+      sourceUrl:     source_url,
+      sourceName:    source_name,
+      sourceTitle:   source_title || null,
+      contentHash:   content_hash || null,
+      status:        status || 'DISCOVERED',
+      category:      category || null,
+      reviewRequired: !!review_required,
+      articleId:     article_id || null,
+      verification:  verification || null,
+      rawData:       raw_data || null,
+    },
+  });
+  res.status(201).json({ item });
+});
+
+// POST /api/newsroom/items/:id/approve — approve a pending item and publish its linked article
+app.post('/api/newsroom/items/:id/approve', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
+  const id   = parseInt(req.params.id);
+  const item = await prisma.newsroomItem.findUnique({ where: { id } });
+  if (!item) return res.status(404).json({ error: 'Newsroom item not found.' });
+
+  let articleStatus = null;
+  if (item.articleId) {
+    // Walk the article through the workflow to PUBLISHED
+    const article = await prisma.article.findUnique({ where: { id: item.articleId } });
+    if (article) {
+      if (article.status === 'DRAFT') {
+        await prisma.$transaction([
+          prisma.article.update({ where: { id: item.articleId }, data: { status: 'SUBMITTED' } }),
+          prisma.editorialAction.create({ data: { articleId: item.articleId, userId: req.user.id, action: 'SUBMITTED', note: 'Auto-submitted from AI Newsroom approval' } }),
+        ]);
+        await prisma.$transaction([
+          prisma.article.update({ where: { id: item.articleId }, data: { status: 'IN_REVIEW' } }),
+          prisma.editorialAction.create({ data: { articleId: item.articleId, userId: req.user.id, action: 'IN_REVIEW', note: 'AI Newsroom approval' } }),
+        ]);
+        await prisma.$transaction([
+          prisma.article.update({ where: { id: item.articleId }, data: { status: 'APPROVED' } }),
+          prisma.editorialAction.create({ data: { articleId: item.articleId, userId: req.user.id, action: 'APPROVED', note: 'AI Newsroom approval' } }),
+        ]);
+        await prisma.$transaction([
+          prisma.article.update({ where: { id: item.articleId }, data: { status: 'PUBLISHED', publishedAt: new Date() } }),
+          prisma.editorialAction.create({ data: { articleId: item.articleId, userId: req.user.id, action: 'PUBLISHED', note: 'Published from AI Newsroom' } }),
+        ]);
+        articleStatus = 'PUBLISHED';
+      } else if (['SUBMITTED', 'IN_REVIEW', 'APPROVED'].includes(article.status)) {
+        await prisma.$transaction([
+          prisma.article.update({ where: { id: item.articleId }, data: { status: 'PUBLISHED', publishedAt: new Date() } }),
+          prisma.editorialAction.create({ data: { articleId: item.articleId, userId: req.user.id, action: 'PUBLISHED', note: 'Published from AI Newsroom' } }),
+        ]);
+        articleStatus = 'PUBLISHED';
+      } else {
+        articleStatus = article.status;
+      }
+    }
+  }
+
+  const updated = await prisma.newsroomItem.update({
+    where: { id },
+    data: { status: 'PUBLISHED' },
+    include: { article: { select: { id: true, slug: true, status: true } } },
+  });
+  res.json({ item: updated, articleStatus });
+});
+
+// POST /api/newsroom/items/:id/reject — reject a newsroom item
+app.post('/api/newsroom/items/:id/reject', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
+  const id   = parseInt(req.params.id);
+  const item = await prisma.newsroomItem.findUnique({ where: { id } });
+  if (!item) return res.status(404).json({ error: 'Newsroom item not found.' });
+
+  // Archive the linked article if it exists and is a draft
+  if (item.articleId) {
+    const article = await prisma.article.findUnique({ where: { id: item.articleId } });
+    if (article && ['DRAFT', 'SUBMITTED'].includes(article.status)) {
+      await prisma.$transaction([
+        prisma.article.update({ where: { id: item.articleId }, data: { status: 'ARCHIVED' } }),
+        prisma.editorialAction.create({ data: { articleId: item.articleId, userId: req.user.id, action: 'ARCHIVED', note: req.body?.note || 'Rejected from AI Newsroom' } }),
+      ]);
+    }
+  }
+
+  const updated = await prisma.newsroomItem.update({ where: { id }, data: { status: 'REJECTED' } });
+  res.json({ item: updated });
+});
+
+// POST /api/newsroom/run — manually trigger one newsroom scan cycle (ADMIN only)
+app.post('/api/newsroom/run', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  if (!newsroom) {
+    return res.status(503).json({ error: 'AI Newsroom is not configured. Check server logs and environment variables.' });
+  }
+  // Run asynchronously — respond immediately so the HTTP request doesn't time out
+  res.json({ ok: true, message: 'Newsroom scan started. Check server logs for progress.' });
+  newsroom.runNewsroom().catch((err) => console.error('[NEWSROOM] Manual run error:', err.message));
+});
+
+// ---------------------------------------------------------------------
 // Static frontend (single Render Web Service serves the Vue build)
 // ---------------------------------------------------------------------
 const distPath = path.join(__dirname, 'dist');
@@ -636,4 +782,10 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Jigawa Times server listening on port ${PORT} [${NODE_ENV}]`));
+app.listen(PORT, () => {
+  console.log(`Jigawa Times server listening on port ${PORT} [${NODE_ENV}]`);
+  // Start the AI Newsroom scheduler (no-op if NEWSROOM_INTERVAL_MINUTES is 0 or not set)
+  if (newsroom) {
+    newsroom.startScheduler();
+  }
+});

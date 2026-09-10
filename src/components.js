@@ -20,7 +20,8 @@ export const ADMIN_NAV = [
   {
     label: 'Newsroom',
     items: [
-      { label: 'Overview',    path: '/admin',             icon: 'fa-solid fa-gauge-high' },
+      { label: 'Overview',      path: '/admin',             icon: 'fa-solid fa-gauge-high' },
+      { label: 'AI Newsroom',   path: '/admin/newsroom',    icon: 'fa-solid fa-robot' },
     ],
   },
   {

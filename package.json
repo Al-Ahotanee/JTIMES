@@ -9,7 +9,9 @@
     "build": "vite build && prisma generate",
     "start": "node server.js",
     "postinstall": "prisma generate",
-    "db:generate": "prisma generate"
+    "db:generate": "prisma generate",
+    "newsroom": "node newsroom/index.js",
+    "newsroom:dry": "node -e \"process.env.NEWSROOM_DRY_RUN='true'; require('./newsroom/index.js');\""
   },
   "dependencies": {
     "@prisma/client": "^5.20.0",
