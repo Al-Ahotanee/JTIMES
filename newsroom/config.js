@@ -58,7 +58,7 @@ const config = Object.freeze({
   // -----------------------------------------------------------------------
   aiProvider: optional('AI_PROVIDER', 'gemini'),
   geminiApiKey: optional('GEMINI_API_KEY'),
-  geminiModel: optional('GEMINI_MODEL', 'gemini-1.5-flash'),
+  geminiModel: optional('GEMINI_MODEL', 'gemini-2.0-flash'),
 
   // Optional fallback (not implemented in v1, reserved for future use)
   aisFallbackProvider: optional('AI_FALLBACK_PROVIDER'),

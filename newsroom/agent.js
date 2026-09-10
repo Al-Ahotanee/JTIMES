@@ -287,6 +287,68 @@ async function deduplicateItems(rawItems, knownHashes, recentArticles, aiDuplica
 // ---------------------------------------------------------------------------
 
 /**
+ * Query the Google Generative Language API to list available models
+ * supporting the generateContent method.
+ */
+function queryAvailableGeminiModels(apiKey, version = 'v1beta') {
+  return new Promise((resolve) => {
+    const req = https.get(
+      `https://generativelanguage.googleapis.com/${version}/models?key=${apiKey}`,
+      { timeout: 10000 },
+      (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          try {
+            const data = JSON.parse(Buffer.concat(chunks).toString());
+            const models = (data?.models || [])
+              .filter((m) => Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes('generateContent'))
+              .map((m) => m.name.replace(/^models\//, ''));
+            resolve(models);
+          } catch {
+            resolve([]);
+          }
+        });
+      }
+    );
+    req.on('error', () => resolve([]));
+    req.on('timeout', () => { req.destroy(); resolve([]); });
+  });
+}
+
+/**
+ * Pick the best available model candidate given a preferred model.
+ */
+function selectBestGeminiModel(availableModels, preferredModel) {
+  if (!availableModels || availableModels.length === 0) return null;
+  if (availableModels.includes(preferredModel)) return preferredModel;
+
+  const prefixMatch = availableModels.find((m) => m.startsWith(preferredModel) || m.includes(preferredModel));
+  if (prefixMatch) return prefixMatch;
+
+  const priorities = [
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+    'gemini-2.0-flash-001',
+    'gemini-flash-latest',
+    'gemini-1.5-flash-latest',
+    'gemini-1.5-flash-002',
+    'gemini-1.5-flash-001',
+    'gemini-1.5-flash',
+    'gemini-2.5-pro',
+    'gemini-2.0-pro',
+    'gemini-1.5-pro',
+  ];
+
+  for (const prio of priorities) {
+    if (availableModels.includes(prio)) return prio;
+  }
+
+  const anyFlash = availableModels.find((m) => m.includes('flash'));
+  return anyFlash || availableModels[0];
+}
+
+/**
  * Create an AI client based on AI_PROVIDER config.
  * Returns an object with a single method: chat(prompt) → string
  * @param {object} config
@@ -298,16 +360,20 @@ function createAiClient(config) {
   if (provider === 'gemini') {
     if (!config.geminiApiKey) throw new Error('GEMINI_API_KEY is not set.');
 
+    let activeModel = config.geminiModel || 'gemini-2.0-flash';
+    let activeVersion = 'v1beta';
+    let modelDiscoveryAttempted = false;
+
     const callGemini = async (prompt, retries = 2) => {
       const body = JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: { temperature: 0.2, maxOutputTokens: 4096 },
       });
-      const modelPath = `/v1beta/models/${config.geminiModel}:generateContent?key=${config.geminiApiKey}`;
       const data = Buffer.from(body);
 
       for (let attempt = 0; attempt <= retries; attempt++) {
         try {
+          const modelPath = `/${activeVersion}/models/${activeModel}:generateContent?key=${config.geminiApiKey}`;
           const result = await new Promise((resolve, reject) => {
             const req = https.request({
               hostname: 'generativelanguage.googleapis.com',
@@ -322,6 +388,9 @@ function createAiClient(config) {
                 const text = Buffer.concat(chunks).toString();
                 if (res.statusCode === 429 || res.statusCode >= 500) {
                   return reject(Object.assign(new Error(`Gemini HTTP ${res.statusCode}`), { retryable: true }));
+                }
+                if (res.statusCode === 404) {
+                  return reject(Object.assign(new Error(`Gemini HTTP 404: ${text.slice(0, 300)}`), { isNotFound: true, responseBody: text }));
                 }
                 if (res.statusCode < 200 || res.statusCode >= 400) {
                   return reject(new Error(`Gemini HTTP ${res.statusCode}: ${text.slice(0, 200)}`));
@@ -340,6 +409,29 @@ function createAiClient(config) {
           if (!text) throw new Error('Empty Gemini response');
           return text;
         } catch (err) {
+          // If the model was not found, auto-discover supported models for this key and retry
+          if (err.isNotFound && !modelDiscoveryAttempted) {
+            modelDiscoveryAttempted = true;
+            console.warn(`[NEWSROOM] Model "${activeModel}" returned 404 on ${activeVersion}. Querying available models for this key...`);
+            let models = await queryAvailableGeminiModels(config.geminiApiKey, 'v1beta');
+            let version = 'v1beta';
+            if (!models.length) {
+              models = await queryAvailableGeminiModels(config.geminiApiKey, 'v1');
+              version = 'v1';
+            }
+
+            const bestModel = selectBestGeminiModel(models, activeModel);
+            if (bestModel && (bestModel !== activeModel || version !== activeVersion)) {
+              console.log(`[NEWSROOM] Auto-selected active Gemini model: "${bestModel}" (${version}) from available: [${models.slice(0, 8).join(', ')}]`);
+              activeModel = bestModel;
+              activeVersion = version;
+              attempt = -1; // restart loop with new model
+              continue;
+            } else if (models.length) {
+              console.warn(`[NEWSROOM] Available models for this key are: [${models.join(', ')}]`);
+            }
+          }
+
           if (attempt < retries && err.retryable) {
             const delay = Math.pow(2, attempt) * 1500;
             console.warn(`[NEWSROOM] Gemini retry ${attempt + 1}/${retries} in ${delay}ms: ${err.message}`);

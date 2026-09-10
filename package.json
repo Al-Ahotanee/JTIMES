@@ -12,7 +12,8 @@
     "db:generate": "prisma generate",
     "newsroom": "node newsroom/index.js",
     "newsroom:dry": "node -e \"process.env.NEWSROOM_DRY_RUN='true'; require('./newsroom/index.js');\"",
-    "newsroom:token": "node newsroom/generate-token.js"
+    "newsroom:token": "node newsroom/generate-token.js",
+    "newsroom:models": "node newsroom/check-models.js"
   },
   "dependencies": {
     "@prisma/client": "^5.20.0",
