@@ -792,51 +792,83 @@ app.post('/api/newsroom/items', requireAuth, requireRole('ADMIN', 'EDITOR'), asy
 
 // POST /api/newsroom/items/:id/approve — approve a pending item and publish its linked article
 app.post('/api/newsroom/items/:id/approve', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
-  const id   = parseInt(req.params.id);
-  const item = await prisma.newsroomItem.findUnique({ where: { id } });
-  if (!item) return res.status(404).json({ error: 'Newsroom item not found.' });
+  const id = parseInt(req.params.id);
+  if (!id || isNaN(id)) return res.status(400).json({ error: 'Valid numeric item ID is required.' });
 
-  let articleStatus = null;
-  if (item.articleId) {
-    // Walk the article through the workflow to PUBLISHED
-    const article = await prisma.article.findUnique({ where: { id: item.articleId } });
-    if (article) {
-      if (article.status === 'DRAFT') {
-        await prisma.$transaction([
-          prisma.article.update({ where: { id: item.articleId }, data: { status: 'SUBMITTED' } }),
-          prisma.editorialAction.create({ data: { articleId: item.articleId, userId: req.user.id, action: 'SUBMITTED', note: 'Auto-submitted from AI Newsroom approval' } }),
-        ]);
-        await prisma.$transaction([
-          prisma.article.update({ where: { id: item.articleId }, data: { status: 'IN_REVIEW' } }),
-          prisma.editorialAction.create({ data: { articleId: item.articleId, userId: req.user.id, action: 'IN_REVIEW', note: 'AI Newsroom approval' } }),
-        ]);
-        await prisma.$transaction([
-          prisma.article.update({ where: { id: item.articleId }, data: { status: 'APPROVED' } }),
-          prisma.editorialAction.create({ data: { articleId: item.articleId, userId: req.user.id, action: 'APPROVED', note: 'AI Newsroom approval' } }),
-        ]);
-        await prisma.$transaction([
-          prisma.article.update({ where: { id: item.articleId }, data: { status: 'PUBLISHED', publishedAt: new Date() } }),
-          prisma.editorialAction.create({ data: { articleId: item.articleId, userId: req.user.id, action: 'PUBLISHED', note: 'Published from AI Newsroom' } }),
-        ]);
-        articleStatus = 'PUBLISHED';
-      } else if (['SUBMITTED', 'IN_REVIEW', 'APPROVED'].includes(article.status)) {
-        await prisma.$transaction([
-          prisma.article.update({ where: { id: item.articleId }, data: { status: 'PUBLISHED', publishedAt: new Date() } }),
-          prisma.editorialAction.create({ data: { articleId: item.articleId, userId: req.user.id, action: 'PUBLISHED', note: 'Published from AI Newsroom' } }),
-        ]);
-        articleStatus = 'PUBLISHED';
-      } else {
-        articleStatus = article.status;
-      }
+  try {
+    const item = await prisma.newsroomItem.findUnique({ where: { id } });
+    if (!item) return res.status(404).json({ error: 'Newsroom item not found.' });
+
+    let article = null;
+    if (item.articleId) {
+      article = await prisma.article.findUnique({ where: { id: item.articleId } });
     }
-  }
 
-  const updated = await prisma.newsroomItem.update({
-    where: { id },
-    data: { status: 'PUBLISHED' },
-    include: { article: { select: { id: true, slug: true, status: true } } },
-  });
-  res.json({ item: updated, articleStatus });
+    if (!article) {
+      // If no article exists yet, create it from the sourced item data so it is live immediately!
+      let category = null;
+      if (item.category) {
+        category = await prisma.category.findUnique({ where: { slug: item.category } });
+      }
+      if (!category) {
+        category = await prisma.category.findFirst({ where: { slug: 'jigawa' } }) || await prisma.category.findFirst();
+      }
+      if (!category) {
+        return res.status(400).json({ error: 'Cannot publish story: No category exists in database. Please create a category first.' });
+      }
+
+      const title = item.sourceTitle || 'News Update';
+      const slugBase = slugify(title).slice(0, 80) || 'news-story';
+      const slug = `${slugBase}-${Date.now().toString(36)}`;
+      const excerpt = `Report compiled from ${item.sourceName || 'News Desk'}.`;
+      const fullBody = [
+        `<p><strong>${title}</strong></p>`,
+        `<p>This report was curated from <a href="${item.sourceUrl}" target="_blank" rel="noopener noreferrer">${item.sourceName || 'original source'}</a>.</p>`,
+        `<p><em>Published by Jigawa Times Editorial Desk.</em></p>`,
+      ].join('\n');
+
+      article = await prisma.article.create({
+        data: {
+          title,
+          slug,
+          excerpt,
+          content: fullBody,
+          categoryId: category.id,
+          authorId: req.user.id,
+          featuredImage: item.rawData?.imageUrl || null,
+          imageCaption: item.sourceName ? `Photo / Report: ${item.sourceName}` : null,
+          status: 'PUBLISHED',
+          publishedAt: new Date(),
+        },
+      });
+
+      await prisma.editorialAction.create({
+        data: {
+          articleId: article.id,
+          userId: req.user.id,
+          action: 'PUBLISHED',
+          note: 'Created and published from AI Newsroom',
+        },
+      });
+    } else {
+      // Walk existing article through to PUBLISHED
+      await prisma.$transaction([
+        prisma.article.update({ where: { id: article.id }, data: { status: 'PUBLISHED', publishedAt: new Date() } }),
+        prisma.editorialAction.create({ data: { articleId: article.id, userId: req.user.id, action: 'PUBLISHED', note: 'Published from AI Newsroom approval' } }),
+      ]);
+    }
+
+    const updated = await prisma.newsroomItem.update({
+      where: { id },
+      data: { status: 'PUBLISHED', articleId: article.id },
+      include: { article: { select: { id: true, slug: true, status: true } } },
+    });
+
+    res.json({ item: updated, articleStatus: 'PUBLISHED', articleSlug: article.slug, articleId: article.id });
+  } catch (err) {
+    console.error(`[NEWSROOM APPROVE] Error approving item ${id}:`, err.message);
+    res.status(500).json({ error: err.message || 'Failed to approve and publish newsroom item' });
+  }
 });
 
 // POST /api/newsroom/items/:id/reject — reject a newsroom item

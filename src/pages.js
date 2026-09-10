@@ -1146,30 +1146,106 @@ export const AdminNewsroom = defineComponent({
 
     watch(statusFilter, load);
 
-    const approve = async (item) => {
-      if (!confirm(`Approve and publish: "${item.sourceTitle || item.sourceName}"?`)) return;
-      try {
-        await api.post(`/api/newsroom/items/${item.id}/approve`);
-        load();
-      } catch (e) { alert(e.message); }
+    // Professional Toast Notifications
+    const toast = reactive({
+      show: false,
+      type: 'success',
+      title: '',
+      message: '',
+      linkUrl: '',
+      linkText: '',
+    });
+    let toastTimer = null;
+    const showToast = (type, title, message, linkUrl = '', linkText = '') => {
+      if (toastTimer) clearTimeout(toastTimer);
+      Object.assign(toast, { show: true, type, title, message, linkUrl, linkText });
+      toastTimer = setTimeout(() => { toast.show = false; }, 8000);
     };
 
-    const reject = async (item) => {
-      if (!confirm(`Reject this item? Its linked article (if any) will be archived.`)) return;
+    // In-App Confirmation Modal (Replaces browser confirm)
+    const modal = reactive({
+      show: false,
+      title: '',
+      message: '',
+      icon: 'fa-cloud-arrow-up',
+      type: 'success',
+      confirmText: 'Publish Now',
+      action: null,
+      loading: false,
+    });
+
+    const openConfirm = ({ title, message, icon, type, confirmText, action }) => {
+      Object.assign(modal, { show: true, title, message, icon: icon || 'fa-cloud-arrow-up', type: type || 'success', confirmText: confirmText || 'Confirm', action, loading: false });
+    };
+
+    const executeModalAction = async () => {
+      if (!modal.action) { modal.show = false; return; }
+      modal.loading = true;
       try {
-        await api.post(`/api/newsroom/items/${item.id}/reject`);
-        load();
-      } catch (e) { alert(e.message); }
+        await modal.action();
+      } finally {
+        modal.loading = false;
+        modal.show = false;
+      }
+    };
+
+    const approve = (item) => {
+      openConfirm({
+        title: 'Publish Story Live',
+        message: `Publish "${item.sourceTitle || item.sourceName}" immediately to Jigawa Times? It will be visible to all readers on the homepage and news category.`,
+        icon: 'fa-cloud-arrow-up',
+        type: 'success',
+        confirmText: 'Approve & Publish',
+        action: async () => {
+          try {
+            const res = await api.post(`/api/newsroom/items/${item.id}/approve`);
+            const slug = res.articleSlug || res.item?.article?.slug || item.article?.slug;
+            showToast(
+              'success',
+              'Story Published Live!',
+              `"${item.sourceTitle || item.sourceName}" is now published on Jigawa Times.`,
+              slug ? `/news/${slug}` : '',
+              'View Article on Site'
+            );
+            await load();
+          } catch (e) {
+            showToast('danger', 'Publish Failed', e.message || 'Could not approve and publish article.');
+          }
+        },
+      });
+    };
+
+    const reject = (item) => {
+      openConfirm({
+        title: 'Reject Story',
+        message: `Reject "${item.sourceTitle || item.sourceName}"? Its linked draft article (if any) will be archived and removed from review.`,
+        icon: 'fa-box-archive',
+        type: 'danger',
+        confirmText: 'Reject & Archive',
+        action: async () => {
+          try {
+            await api.post(`/api/newsroom/items/${item.id}/reject`);
+            showToast('info', 'Story Rejected', 'The news item has been marked as rejected and archived.');
+            await load();
+          } catch (e) {
+            showToast('danger', 'Action Failed', e.message || 'Could not reject item.');
+          }
+        },
+      });
     };
 
     const runNow = async () => {
       running.value = true;
       try {
         const res = await api.post('/api/newsroom/run');
-        alert(res.message || 'Newsroom scan started. Check the live terminal below.');
+        showToast(
+          'info',
+          'AI Newsroom Scan Started',
+          res.message || 'Scanning news sources and processing candidates in background. Live output below.'
+        );
         await fetchLogs();
       } catch (e) {
-        alert(e.message || 'Could not start newsroom scan. Is GEMINI_API_KEY set?');
+        showToast('danger', 'Scan Failed', e.message || 'Could not start newsroom scan. Check GEMINI_API_KEY.');
       } finally {
         setTimeout(() => { running.value = false; load(); }, 4000);
       }
@@ -1177,10 +1253,57 @@ export const AdminNewsroom = defineComponent({
 
     const statusLabel = (s) => (s || '').replace(/_/g, ' ');
 
-    return { items, stats, logs, statusFilter, loading, running, error, approve, reject, runNow, statusLabel, fetchLogs, timeAgo };
+    return {
+      items, stats, logs, statusFilter, loading, running, error,
+      approve, reject, runNow, statusLabel, fetchLogs, timeAgo,
+      toast, showToast, modal, executeModalAction,
+    };
   },
   template: `
     <dash-shell title="AI Newsroom">
+      <!-- Professional Floating Toast Alert -->
+      <div v-if="toast.show" :style="'position:fixed;top:24px;right:24px;z-index:99999;min-width:320px;max-width:440px;background:var(--bg-1);border-radius:var(--radius);box-shadow:0 12px 36px rgba(0,0,0,0.18);border:1px solid var(--line);border-left:5px solid ' + (toast.type==='success'?'var(--green)':toast.type==='danger'?'var(--red)':'var(--accent)') + ';padding:14px 18px;display:flex;flex-direction:column;gap:6px;'">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <div style="display:flex;align-items:center;gap:8px;font-weight:700;font-size:14px;">
+            <i v-if="toast.type==='success'" class="fa-solid fa-circle-check" style="color:var(--green);font-size:16px;" aria-hidden="true"></i>
+            <i v-else-if="toast.type==='danger'" class="fa-solid fa-triangle-exclamation" style="color:var(--red);font-size:16px;" aria-hidden="true"></i>
+            <i v-else class="fa-solid fa-circle-info" style="color:var(--accent);font-size:16px;" aria-hidden="true"></i>
+            <span>{{ toast.title }}</span>
+          </div>
+          <button type="button" @click="toast.show = false" style="background:none;border:none;color:var(--ink-4);cursor:pointer;font-size:14px;padding:2px 6px;">
+            <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+          </button>
+        </div>
+        <p style="margin:0;font-size:13px;color:var(--ink-2);line-height:1.4;">{{ toast.message }}</p>
+        <div v-if="toast.linkUrl" style="margin-top:4px;">
+          <a :href="toast.linkUrl" target="_blank" style="font-size:12px;font-weight:700;color:var(--accent);display:inline-flex;align-items:center;gap:5px;">
+            {{ toast.linkText || 'View Article' }} <i class="fa-solid fa-arrow-up-right-from-square" style="font-size:11px;" aria-hidden="true"></i>
+          </a>
+        </div>
+      </div>
+
+      <!-- Confirmation Modal -->
+      <div v-if="modal.show" style="position:fixed;inset:0;background:rgba(0,0,0,0.55);backdrop-filter:blur(2px);z-index:99998;display:flex;align-items:center;justify-content:center;padding:16px;">
+        <div style="background:var(--bg-1);border:1px solid var(--line);border-radius:var(--radius);width:100%;max-width:440px;box-shadow:0 20px 40px rgba(0,0,0,0.25);overflow:hidden;">
+          <div style="padding:20px;display:flex;flex-direction:column;gap:12px;">
+            <div style="display:flex;align-items:center;gap:12px;">
+              <div :style="'width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;background:' + (modal.type==='danger'?'rgba(239,68,68,0.12)':'rgba(34,197,94,0.12)') + ';color:' + (modal.type==='danger'?'var(--red)':'var(--green)')">
+                <i :class="'fa-solid ' + modal.icon" aria-hidden="true"></i>
+              </div>
+              <h3 style="margin:0;font-size:16px;font-weight:700;">{{ modal.title }}</h3>
+            </div>
+            <p style="margin:0;font-size:13px;color:var(--ink-2);line-height:1.5;">{{ modal.message }}</p>
+          </div>
+          <div style="display:flex;justify-content:flex-end;gap:10px;padding:12px 20px;background:var(--bg-2);border-top:1px solid var(--line);">
+            <button type="button" class="btn ghost sm" :disabled="modal.loading" @click="modal.show = false">Cancel</button>
+            <button type="button" :class="'btn sm ' + (modal.type==='danger'?'danger':'accent')" :disabled="modal.loading" @click="executeModalAction">
+              <i :class="modal.loading ? 'fa-solid fa-spinner fa-spin' : ('fa-solid ' + modal.icon)" aria-hidden="true"></i>
+              {{ modal.loading ? 'Processing…' : modal.confirmText }}
+            </button>
+          </div>
+        </div>
+      </div>
+
       <!-- Stats row -->
       <div class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr));margin-bottom:var(--s6);">
         <div class="stat-card">
@@ -1226,8 +1349,8 @@ export const AdminNewsroom = defineComponent({
         </div>
       </div>
 
-      <!-- Error -->
-      <div v-if="error" class="form-error" style="margin-bottom:var(--s4);">
+      <!-- Error banner if load failed -->
+      <div v-if="error" class="form-error" style="margin-bottom:var(--s4);display:flex;align-items:center;gap:8px;">
         <i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i> {{ error }}
       </div>
 
@@ -1238,9 +1361,8 @@ export const AdminNewsroom = defineComponent({
       </div>
       <div v-else-if="!items.length" class="state-block">
         <div class="state-icon" style="color:var(--ink-4);"><i class="fa-solid fa-robot" aria-hidden="true"></i></div>
-        <h2>No items yet</h2>
-        <p>Click <strong>Run Now</strong> to start the first newsroom scan, or run <code>npm run newsroom</code> from the terminal.</p>
-        <p style="font-size:var(--text-xs);color:var(--ink-4);margin-top:var(--s2);">Make sure <code>GEMINI_API_KEY</code> and <code>NEWSROOM_API_TOKEN</code> are set in your environment.</p>
+        <h2>No items found</h2>
+        <p>Click <strong>Run Now</strong> to start an AI newsroom scan cycle.</p>
       </div>
       <div v-else class="table-wrap">
         <table aria-label="Newsroom items">
@@ -1257,53 +1379,76 @@ export const AdminNewsroom = defineComponent({
           </thead>
           <tbody>
             <tr v-for="item in items" :key="item.id">
-              <td class="td-title" style="max-width:260px;">
-                <a :href="item.sourceUrl" target="_blank" rel="noopener noreferrer" :title="item.sourceTitle || item.sourceName">
+              <td class="td-title" style="max-width:280px;">
+                <a :href="item.sourceUrl" target="_blank" rel="noopener noreferrer" :title="item.sourceTitle || item.sourceName" style="font-weight:600;line-height:1.35;display:block;">
                   {{ item.sourceTitle || item.sourceName }}
                 </a>
-                <div v-if="item.article" style="margin-top:3px;">
-                  <router-link :to="'/news/'+item.article.slug" target="_blank" style="font-size:var(--text-xs);color:var(--accent);">
-                    <i class="fa-solid fa-newspaper" aria-hidden="true"></i> View article
+                <!-- Live Article on Site Link -->
+                <div v-if="item.article && item.status === 'PUBLISHED'" style="margin-top:4px;">
+                  <a :href="'/news/' + item.article.slug" target="_blank" style="font-size:11px;font-weight:700;color:var(--green);display:inline-flex;align-items:center;gap:4px;background:rgba(34,197,94,0.12);padding:2px 7px;border-radius:4px;text-decoration:none;">
+                    <i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i> Live on Site
+                  </a>
+                </div>
+                <!-- Draft Article Link -->
+                <div v-else-if="item.article" style="margin-top:4px;">
+                  <router-link :to="'/reporter/edit/' + item.article.id" target="_blank" style="font-size:11px;font-weight:600;color:var(--accent);display:inline-flex;align-items:center;gap:4px;text-decoration:none;">
+                    <i class="fa-solid fa-pen-to-square" aria-hidden="true"></i> Edit Draft #{{ item.article.id }}
                   </router-link>
+                </div>
+                <!-- Sourced Only Item -->
+                <div v-else style="margin-top:4px;font-size:11px;color:var(--ink-4);display:inline-flex;align-items:center;gap:4px;">
+                  <i class="fa-solid fa-satellite-dish" aria-hidden="true"></i> Sourced story
                 </div>
               </td>
               <td class="muted" style="font-size:var(--text-xs);">{{ item.sourceName }}</td>
               <td><span :class="'badge status-'+(item.status==='PENDING_REVIEW'?'IN_REVIEW':item.status==='PUBLISHED'?'PUBLISHED':item.status==='FAILED'?'ARCHIVED':'DRAFT')">{{ statusLabel(item.status) }}</span></td>
               <td class="muted" style="font-size:var(--text-xs);">{{ item.category || '—' }}</td>
               <td>
-                <span v-if="item.reviewRequired" style="color:var(--amber);font-size:var(--text-xs);font-weight:700;">
+                <span v-if="item.reviewRequired" style="color:var(--amber);font-size:var(--text-xs);font-weight:700;display:inline-flex;align-items:center;gap:3px;">
                   <i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i> Yes
                 </span>
                 <span v-else style="color:var(--ink-4);font-size:var(--text-xs);">—</span>
               </td>
               <td class="muted" style="white-space:nowrap;font-size:var(--text-xs);">{{ timeAgo(item.createdAt) }}</td>
               <td>
-                <div class="action-btns">
+                <div class="action-btns" style="display:flex;align-items:center;gap:6px;">
+                  <!-- Publish Button -->
                   <button
-                    v-if="['PENDING_REVIEW','GENERATED','DRAFT'].includes(item.status)"
-                    class="icon-btn success"
+                    v-if="item.status !== 'PUBLISHED' && item.status !== 'REJECTED'"
+                    class="btn sm accent"
                     @click="approve(item)"
-                    title="Approve & Publish"
-                    aria-label="Approve and publish this item">
-                    <i class="fa-solid fa-check" aria-hidden="true"></i>
+                    title="Publish Live on Jigawa Times"
+                    style="padding:3px 10px;font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:5px;">
+                    <i class="fa-solid fa-cloud-arrow-up" aria-hidden="true"></i> Publish
                   </button>
+                  <!-- Reject Button -->
                   <button
-                    v-if="!['PUBLISHED','REJECTED'].includes(item.status)"
-                    class="icon-btn danger"
+                    v-if="item.status !== 'REJECTED'"
+                    class="btn sm ghost danger"
                     @click="reject(item)"
-                    title="Reject"
-                    aria-label="Reject this item">
+                    title="Reject & Archive"
+                    style="padding:3px 8px;font-size:12px;">
                     <i class="fa-solid fa-xmark" aria-hidden="true"></i>
                   </button>
+                  <!-- View / Edit Link -->
                   <a
-                    v-if="item.article"
-                    class="icon-btn"
-                    :href="'/reporter/edit/'+item.article.id"
+                    v-if="item.article?.slug && item.status === 'PUBLISHED'"
+                    class="btn sm ghost"
+                    :href="'/news/' + item.article.slug"
                     target="_blank"
-                    title="Edit article"
-                    aria-label="Edit linked article">
-                    <i class="fa-solid fa-pen" aria-hidden="true"></i>
+                    title="View live article"
+                    style="padding:3px 8px;font-size:12px;color:var(--green);">
+                    <i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i>
                   </a>
+                  <router-link
+                    v-else-if="item.article?.id"
+                    class="btn sm ghost"
+                    :to="'/reporter/edit/' + item.article.id"
+                    target="_blank"
+                    title="Edit draft"
+                    style="padding:3px 8px;font-size:12px;">
+                    <i class="fa-solid fa-pen" aria-hidden="true"></i>
+                  </router-link>
                 </div>
               </td>
             </tr>

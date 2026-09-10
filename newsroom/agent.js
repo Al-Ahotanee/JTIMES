@@ -708,20 +708,115 @@ function buildImageCaption(image, articleDisclosure) {
  * @param {boolean} highRisk Whether editorial review is required
  * @returns {Promise<{articleId, status, dryRun}>}
  */
-async function publishArticle(payload, config, highRisk) {
+async function publishArticle(payload, config, highRisk, prismaClient) {
   if (config.dryRun) {
-    console.log('[NEWSROOM] DRY RUN — article NOT published:');
-    console.log(`  Headline: ${payload.headline}`);
-    console.log(`  Category: ${payload.categorySlug}`);
-    console.log(`  Tags: ${(payload.tags || []).join(', ')}`);
-    console.log(`  Review required: ${highRisk}`);
+    logger.info(`[DRY RUN] Article NOT published: "${payload.headline}" (Category: ${payload.categorySlug})`);
     return { articleId: null, status: 'DRY_RUN', dryRun: true };
   }
 
+  // 1. Direct Prisma DB creation (Fastest, zero loopback network errors, zero auth mismatch)
+  if (prismaClient) {
+    try {
+      // Find author
+      let author = null;
+      if (config.authorEmail) {
+        author = await prismaClient.user.findUnique({ where: { email: config.authorEmail.toLowerCase().trim() } });
+      }
+      if (!author) {
+        author = await prismaClient.user.findFirst({ where: { role: 'ADMIN', active: true } }) ||
+                 await prismaClient.user.findFirst({ where: { active: true } });
+      }
+      if (!author) throw new Error('No active user found in database to author the article.');
+
+      // Find category
+      let category = await prismaClient.category.findUnique({ where: { slug: payload.categorySlug } });
+      if (!category) {
+        category = await prismaClient.category.findFirst({ where: { slug: 'jigawa' } }) ||
+                   await prismaClient.category.findFirst();
+      }
+      if (!category) throw new Error(`No category found for slug "${payload.categorySlug}"`);
+
+      // Build slug
+      const slugBase = (payload.headline || 'story')
+        .toLowerCase()
+        .replace(/[^a-z0-9\s-]/g, '')
+        .trim()
+        .replace(/\s+/g, '-')
+        .slice(0, 80) || 'news-update';
+      const slug = `${slugBase}-${Date.now().toString(36)}`;
+
+      // Build full body HTML with byline, disclosure
+      const fullBody = [
+        `<p><em>By ${payload.byline || 'Jigawa Times News Desk'}</em></p>`,
+        payload.body,
+        `<p><em>${payload.disclosure || ''}</em></p>`,
+        payload.sources?.length
+          ? `<p><strong>Sources:</strong> ${payload.sources.map((s) => `<a href="${s.url}" target="_blank" rel="noopener noreferrer">${s.name}</a>`).join(', ')}</p>`
+          : '',
+      ].filter(Boolean).join('\n');
+
+      let finalStatus = 'DRAFT';
+      if (!highRisk && config.mode === 'auto') {
+        finalStatus = 'PUBLISHED';
+      } else if (!highRisk && config.mode === 'semi_auto') {
+        finalStatus = 'SUBMITTED';
+      }
+
+      // Create article in database
+      const article = await prismaClient.article.create({
+        data: {
+          title: payload.headline,
+          slug,
+          excerpt: payload.excerpt || payload.subheadline || '',
+          content: fullBody,
+          categoryId: category.id,
+          authorId: author.id,
+          featuredImage: payload.image?.url || null,
+          imageCaption: buildImageCaption(payload.image),
+          isBreaking: false,
+          isFeatured: false,
+          status: finalStatus,
+          publishedAt: finalStatus === 'PUBLISHED' ? new Date() : null,
+          tags: payload.tags?.length
+            ? {
+                create: await Promise.all(
+                  payload.tags.map(async (name) => {
+                    const tagSlug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 50);
+                    return {
+                      tag: {
+                        connectOrCreate: {
+                          where: { slug: tagSlug },
+                          create: { name, slug: tagSlug },
+                        },
+                      },
+                    };
+                  })
+                ),
+              }
+            : undefined,
+        },
+      });
+
+      await prismaClient.editorialAction.create({
+        data: {
+          articleId: article.id,
+          userId: author.id,
+          action: finalStatus,
+          note: `AI Newsroom (${config.mode} mode, reviewRequired: ${highRisk})`,
+        },
+      });
+
+      logger.info(`[DB SUCCESS] Article #${article.id} ("${article.title.slice(0, 45)}...") created in database (status: ${finalStatus})`);
+      return { articleId: article.id, status: finalStatus, dryRun: false };
+    } catch (dbErr) {
+      logger.warn(`Prisma direct publish failed, trying HTTP API fallback: ${dbErr.message}`);
+    }
+  }
+
+  // 2. HTTP Fallback via JT API
   const token = await ensureToken(config);
   const catId = await resolveCategoryId(payload.categorySlug, config, token);
 
-  // Build the full body HTML with byline, disclosure
   const fullBody = [
     `<p><em>By ${payload.byline}</em></p>`,
     payload.body,
@@ -743,29 +838,24 @@ async function publishArticle(payload, config, highRisk) {
     isFeatured:   false,
   };
 
-  // Create the article (status: DRAFT)
   const created = await postJson(`${config.apiUrl}/api/articles`, articleBody, token);
   const articleId = created?.article?.id;
   if (!articleId) throw new Error('API did not return an article ID');
 
   let finalStatus = 'DRAFT';
-
   if (highRisk || config.mode === 'manual') {
-    // Manual or high-risk: leave as DRAFT — editor will review in admin
-    console.log(`[NEWSROOM] Article ${articleId} created as DRAFT (review required: ${highRisk})`);
+    logger.info(`Article ${articleId} created as DRAFT (review required: ${highRisk})`);
     finalStatus = 'DRAFT';
   } else if (config.mode === 'semi_auto') {
-    // Submit for editorial review
     await postJson(`${config.apiUrl}/api/articles/${articleId}/submit`, {}, token);
-    console.log(`[NEWSROOM] Article ${articleId} submitted for review`);
+    logger.info(`Article ${articleId} submitted for review`);
     finalStatus = 'SUBMITTED';
   } else if (config.mode === 'auto') {
-    // Low-risk auto: submit → review → approve → publish
     await postJson(`${config.apiUrl}/api/articles/${articleId}/submit`, {}, token);
     await postJson(`${config.apiUrl}/api/articles/${articleId}/review`, {}, token);
     await postJson(`${config.apiUrl}/api/articles/${articleId}/approve`, {}, token);
     await postJson(`${config.apiUrl}/api/articles/${articleId}/publish`, {}, token);
-    console.log(`[NEWSROOM] Article ${articleId} published`);
+    logger.info(`Article ${articleId} published`);
     finalStatus = 'PUBLISHED';
   }
 
@@ -785,7 +875,7 @@ async function publishArticle(payload, config, highRisk) {
  * @param {object[]} recentArticles  Recent JT articles for dedup
  * @returns {Promise<{status, articleId?, reason?}>}
  */
-async function processStory(item, aiClient, config, recentArticles) {
+async function processStory(item, aiClient, config, recentArticles, prismaClient = null) {
   // --- Stage 3: Classify ---
   let classification;
   try {
@@ -878,11 +968,11 @@ async function processStory(item, aiClient, config, recentArticles) {
   };
 
   try {
-    const result = await publishArticle(payload, config, highRisk);
+    const result = await publishArticle(payload, config, highRisk, prismaClient);
     return { status: result.status, articleId: result.articleId, dryRun: result.dryRun, highRisk };
   } catch (err) {
-    console.error(`[NEWSROOM] Publish failed for "${article.headline}": ${err.message}`);
-    return { status: 'FAILED', reason: 'publish_error' };
+    logger.error(`[NEWSROOM] Publish failed for "${article.headline}": ${err.message}`);
+    return { status: 'FAILED', reason: 'publish_error', error: err.message };
   }
 }
 

@@ -260,7 +260,7 @@ async function runNewsroom() {
     stats.processed++;
     logger.info(`Analyzing (${stats.processed}/${prioritizedCandidates.length}): "${item.title.slice(0, 60)}..." [${item.sourceName}]`);
 
-    const result = await processStory(item, aiClient, config, recentArticles);
+    const result = await processStory(item, aiClient, config, recentArticles, prismaClient);
 
     switch (result.status) {
       case 'PUBLISHED':
