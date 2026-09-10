@@ -738,19 +738,46 @@ app.get('/robots.txt', (req, res) => {
 // These routes reuse existing auth middleware — no second auth system.
 // ---------------------------------------------------------------------
 
-// GET /api/newsroom/items — list newsroom_items with optional status filter
+// GET /api/newsroom/items — list newsroom_items with optional status, category, search filters
 app.get('/api/newsroom/items', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
-  const { status, pageSize: ps, page: pg } = req.query;
+  const { status, category, review, q, pageSize: ps, page: pg } = req.query;
   const pageSize = Math.min(Math.max(parseInt(ps) || 20, 1), 100);
   const page     = Math.max(parseInt(pg) || 1, 1);
-  const where    = status ? { status } : {};
+  const where    = {};
+
+  if (status) where.status = status;
+  if (category) where.category = category;
+  if (review === 'true') where.reviewRequired = true;
+  if (review === 'false') where.reviewRequired = false;
+  if (q && typeof q === 'string' && q.trim()) {
+    const term = q.trim();
+    where.OR = [
+      { sourceTitle: { contains: term, mode: 'insensitive' } },
+      { sourceName: { contains: term, mode: 'insensitive' } },
+    ];
+  }
+
   const [items, total] = await Promise.all([
     prisma.newsroomItem.findMany({
       where,
       orderBy: { createdAt: 'desc' },
       skip: (page - 1) * pageSize,
       take: pageSize,
-      include: { article: { select: { id: true, title: true, slug: true, status: true } } },
+      include: {
+        article: {
+          select: {
+            id: true,
+            title: true,
+            slug: true,
+            status: true,
+            content: true,
+            excerpt: true,
+            featuredImage: true,
+            imageCaption: true,
+            publishedAt: true,
+          },
+        },
+      },
     }),
     prisma.newsroomItem.count({ where }),
   ]);
@@ -790,81 +817,104 @@ app.post('/api/newsroom/items', requireAuth, requireRole('ADMIN', 'EDITOR'), asy
   res.status(201).json({ item });
 });
 
+// Helper to approve and publish a single newsroom item
+async function approveNewsroomItem(id, userId) {
+  const item = await prisma.newsroomItem.findUnique({ where: { id } });
+  if (!item) throw new Error(`Newsroom item #${id} not found.`);
+
+  let article = null;
+  if (item.articleId) {
+    article = await prisma.article.findUnique({ where: { id: item.articleId } });
+  }
+
+  if (!article) {
+    let category = null;
+    if (item.category) {
+      category = await prisma.category.findUnique({ where: { slug: item.category } });
+    }
+    if (!category) {
+      category = await prisma.category.findFirst({ where: { slug: 'jigawa' } }) || await prisma.category.findFirst();
+    }
+    if (!category) {
+      throw new Error('No category available in database to publish story.');
+    }
+
+    const title = item.sourceTitle || 'News Update';
+    const slugBase = slugify(title).slice(0, 80) || 'news-story';
+    const slug = `${slugBase}-${Date.now().toString(36)}`;
+    const excerpt = `Report compiled from ${item.sourceName || 'News Desk'}.`;
+    const fullBody = [
+      `<p><strong>${title}</strong></p>`,
+      `<p>This report was curated from <a href="${item.sourceUrl}" target="_blank" rel="noopener noreferrer">${item.sourceName || 'original source'}</a>.</p>`,
+      `<p><em>Published by Jigawa Times Editorial Desk.</em></p>`,
+    ].join('\n');
+
+    article = await prisma.article.create({
+      data: {
+        title,
+        slug,
+        excerpt,
+        content: fullBody,
+        categoryId: category.id,
+        authorId: userId,
+        featuredImage: item.rawData?.imageUrl || null,
+        imageCaption: item.sourceName ? `Photo / Report: ${item.sourceName}` : null,
+        status: 'PUBLISHED',
+        publishedAt: new Date(),
+      },
+    });
+
+    await prisma.editorialAction.create({
+      data: {
+        articleId: article.id,
+        userId,
+        action: 'PUBLISHED',
+        note: 'Created and published from AI Newsroom',
+      },
+    });
+  } else {
+    await prisma.$transaction([
+      prisma.article.update({ where: { id: article.id }, data: { status: 'PUBLISHED', publishedAt: new Date() } }),
+      prisma.editorialAction.create({ data: { articleId: article.id, userId, action: 'PUBLISHED', note: 'Published from AI Newsroom approval' } }),
+    ]);
+  }
+
+  const updated = await prisma.newsroomItem.update({
+    where: { id },
+    data: { status: 'PUBLISHED', articleId: article.id },
+    include: { article: { select: { id: true, slug: true, status: true } } },
+  });
+
+  return { item: updated, articleSlug: article.slug, articleId: article.id };
+}
+
+// Helper to reject a single newsroom item
+async function rejectNewsroomItem(id, userId, note = 'Rejected from AI Newsroom') {
+  const item = await prisma.newsroomItem.findUnique({ where: { id } });
+  if (!item) throw new Error(`Newsroom item #${id} not found.`);
+
+  if (item.articleId) {
+    const article = await prisma.article.findUnique({ where: { id: item.articleId } });
+    if (article && ['DRAFT', 'SUBMITTED'].includes(article.status)) {
+      await prisma.$transaction([
+        prisma.article.update({ where: { id: item.articleId }, data: { status: 'ARCHIVED' } }),
+        prisma.editorialAction.create({ data: { articleId: item.articleId, userId, action: 'ARCHIVED', note } }),
+      ]);
+    }
+  }
+
+  const updated = await prisma.newsroomItem.update({ where: { id }, data: { status: 'REJECTED' } });
+  return updated;
+}
+
 // POST /api/newsroom/items/:id/approve — approve a pending item and publish its linked article
 app.post('/api/newsroom/items/:id/approve', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
   const id = parseInt(req.params.id);
   if (!id || isNaN(id)) return res.status(400).json({ error: 'Valid numeric item ID is required.' });
 
   try {
-    const item = await prisma.newsroomItem.findUnique({ where: { id } });
-    if (!item) return res.status(404).json({ error: 'Newsroom item not found.' });
-
-    let article = null;
-    if (item.articleId) {
-      article = await prisma.article.findUnique({ where: { id: item.articleId } });
-    }
-
-    if (!article) {
-      // If no article exists yet, create it from the sourced item data so it is live immediately!
-      let category = null;
-      if (item.category) {
-        category = await prisma.category.findUnique({ where: { slug: item.category } });
-      }
-      if (!category) {
-        category = await prisma.category.findFirst({ where: { slug: 'jigawa' } }) || await prisma.category.findFirst();
-      }
-      if (!category) {
-        return res.status(400).json({ error: 'Cannot publish story: No category exists in database. Please create a category first.' });
-      }
-
-      const title = item.sourceTitle || 'News Update';
-      const slugBase = slugify(title).slice(0, 80) || 'news-story';
-      const slug = `${slugBase}-${Date.now().toString(36)}`;
-      const excerpt = `Report compiled from ${item.sourceName || 'News Desk'}.`;
-      const fullBody = [
-        `<p><strong>${title}</strong></p>`,
-        `<p>This report was curated from <a href="${item.sourceUrl}" target="_blank" rel="noopener noreferrer">${item.sourceName || 'original source'}</a>.</p>`,
-        `<p><em>Published by Jigawa Times Editorial Desk.</em></p>`,
-      ].join('\n');
-
-      article = await prisma.article.create({
-        data: {
-          title,
-          slug,
-          excerpt,
-          content: fullBody,
-          categoryId: category.id,
-          authorId: req.user.id,
-          featuredImage: item.rawData?.imageUrl || null,
-          imageCaption: item.sourceName ? `Photo / Report: ${item.sourceName}` : null,
-          status: 'PUBLISHED',
-          publishedAt: new Date(),
-        },
-      });
-
-      await prisma.editorialAction.create({
-        data: {
-          articleId: article.id,
-          userId: req.user.id,
-          action: 'PUBLISHED',
-          note: 'Created and published from AI Newsroom',
-        },
-      });
-    } else {
-      // Walk existing article through to PUBLISHED
-      await prisma.$transaction([
-        prisma.article.update({ where: { id: article.id }, data: { status: 'PUBLISHED', publishedAt: new Date() } }),
-        prisma.editorialAction.create({ data: { articleId: article.id, userId: req.user.id, action: 'PUBLISHED', note: 'Published from AI Newsroom approval' } }),
-      ]);
-    }
-
-    const updated = await prisma.newsroomItem.update({
-      where: { id },
-      data: { status: 'PUBLISHED', articleId: article.id },
-      include: { article: { select: { id: true, slug: true, status: true } } },
-    });
-
-    res.json({ item: updated, articleStatus: 'PUBLISHED', articleSlug: article.slug, articleId: article.id });
+    const result = await approveNewsroomItem(id, req.user.id);
+    res.json({ item: result.item, articleStatus: 'PUBLISHED', articleSlug: result.articleSlug, articleId: result.articleId });
   } catch (err) {
     console.error(`[NEWSROOM APPROVE] Error approving item ${id}:`, err.message);
     res.status(500).json({ error: err.message || 'Failed to approve and publish newsroom item' });
@@ -873,23 +923,121 @@ app.post('/api/newsroom/items/:id/approve', requireAuth, requireRole('ADMIN', 'E
 
 // POST /api/newsroom/items/:id/reject — reject a newsroom item
 app.post('/api/newsroom/items/:id/reject', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
-  const id   = parseInt(req.params.id);
-  const item = await prisma.newsroomItem.findUnique({ where: { id } });
-  if (!item) return res.status(404).json({ error: 'Newsroom item not found.' });
+  const id = parseInt(req.params.id);
+  if (!id || isNaN(id)) return res.status(400).json({ error: 'Valid numeric item ID is required.' });
 
-  // Archive the linked article if it exists and is a draft
-  if (item.articleId) {
-    const article = await prisma.article.findUnique({ where: { id: item.articleId } });
-    if (article && ['DRAFT', 'SUBMITTED'].includes(article.status)) {
-      await prisma.$transaction([
-        prisma.article.update({ where: { id: item.articleId }, data: { status: 'ARCHIVED' } }),
-        prisma.editorialAction.create({ data: { articleId: item.articleId, userId: req.user.id, action: 'ARCHIVED', note: req.body?.note || 'Rejected from AI Newsroom' } }),
-      ]);
+  try {
+    const updated = await rejectNewsroomItem(id, req.user.id, req.body?.note);
+    res.json({ item: updated });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Failed to reject newsroom item' });
+  }
+});
+
+// DELETE /api/newsroom/items/:id — delete a single newsroom item
+app.delete('/api/newsroom/items/:id', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  const id = parseInt(req.params.id);
+  if (!id || isNaN(id)) return res.status(400).json({ error: 'Valid numeric item ID is required.' });
+
+  try {
+    await prisma.newsroomItem.delete({ where: { id } });
+    res.json({ ok: true, message: `Newsroom item #${id} deleted.` });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Failed to delete newsroom item' });
+  }
+});
+
+// POST /api/newsroom/batch/approve — batch approve and publish multiple items
+app.post('/api/newsroom/batch/approve', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
+  const { ids } = req.body || {};
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'Array of item IDs is required.' });
+  }
+
+  let successful = 0;
+  let failed = 0;
+  const errors = [];
+
+  for (const id of ids) {
+    try {
+      await approveNewsroomItem(parseInt(id), req.user.id);
+      successful++;
+    } catch (e) {
+      failed++;
+      errors.push({ id, error: e.message });
     }
   }
 
-  const updated = await prisma.newsroomItem.update({ where: { id }, data: { status: 'REJECTED' } });
-  res.json({ item: updated });
+  res.json({ ok: true, successful, failed, errors });
+});
+
+// POST /api/newsroom/batch/reject — batch reject multiple items
+app.post('/api/newsroom/batch/reject', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
+  const { ids, note } = req.body || {};
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'Array of item IDs is required.' });
+  }
+
+  let successful = 0;
+  let failed = 0;
+
+  for (const id of ids) {
+    try {
+      await rejectNewsroomItem(parseInt(id), req.user.id, note);
+      successful++;
+    } catch {
+      failed++;
+    }
+  }
+
+  res.json({ ok: true, successful, failed });
+});
+
+// POST /api/newsroom/batch/delete — batch delete multiple items
+app.post('/api/newsroom/batch/delete', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  const { ids } = req.body || {};
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'Array of item IDs is required.' });
+  }
+
+  try {
+    const numericIds = ids.map((id) => parseInt(id)).filter(Boolean);
+    const result = await prisma.newsroomItem.deleteMany({
+      where: { id: { in: numericIds } },
+    });
+    res.json({ ok: true, deleted: result.count });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Failed to delete newsroom items' });
+  }
+});
+
+// GET /api/newsroom/status — return engine status, windows, and pause state
+app.get('/api/newsroom/status', requireAuth, requireRole('ADMIN', 'EDITOR'), (req, res) => {
+  if (!newsroom) {
+    return res.json({ isPaused: true, isRunning: false, inWindow: false, windows: [] });
+  }
+  res.json(newsroom.getEngineStatus());
+});
+
+// POST /api/newsroom/engine/pause — pause newsroom engine indefinitely
+app.post('/api/newsroom/engine/pause', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  if (!newsroom) return res.status(503).json({ error: 'Newsroom engine not loaded.' });
+  const status = await newsroom.pauseEngine(true);
+  res.json({ ok: true, message: 'AI Newsroom engine paused indefinitely.', status });
+});
+
+// POST /api/newsroom/engine/resume — resume newsroom engine
+app.post('/api/newsroom/engine/resume', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  if (!newsroom) return res.status(503).json({ error: 'Newsroom engine not loaded.' });
+  const status = await newsroom.resumeEngine(true);
+  res.json({ ok: true, message: 'AI Newsroom engine resumed.', status });
+});
+
+// POST /api/newsroom/engine/stop — abort ongoing scan
+app.post('/api/newsroom/engine/stop', requireAuth, requireRole('ADMIN'), (req, res) => {
+  if (!newsroom) return res.status(503).json({ error: 'Newsroom engine not loaded.' });
+  const result = newsroom.stopRunningScan();
+  res.json(result);
 });
 
 // GET /api/newsroom/logs — retrieve recent in-memory newsroom logs for live admin dashboard
@@ -907,7 +1055,7 @@ app.post('/api/newsroom/run', requireAuth, requireRole('ADMIN'), async (req, res
   }
   logger.info(`Manual scan initiated from Admin UI by ${req.user.email}`);
   res.json({ ok: true, message: 'Newsroom scan started. Check server logs or live terminal below.' });
-  newsroom.runNewsroom().catch((err) => logger.error('Manual run failed:', err.message));
+  newsroom.runNewsroom({ force: true }).catch((err) => logger.error('Manual run failed:', err.message));
 });
 
 // ---------------------------------------------------------------------

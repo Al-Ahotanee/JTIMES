@@ -1155,16 +1155,53 @@ export const AdminComments = defineComponent({
 // AI NEWSROOM ADMIN PAGE
 // -----------------------------------------------------------------------
 
+// -----------------------------------------------------------------------
+// AI NEWSROOM ADMIN PAGE
+// -----------------------------------------------------------------------
+
 export const AdminNewsroom = defineComponent({
   setup() {
-    const items       = ref([]);
-    const stats       = ref({ discovered: 0, pending_review: 0, generated: 0, published: 0, failed: 0, rejected: 0 });
-    const logs        = ref([]);
-    const statusFilter = ref('');
-    const loading     = ref(true);
-    const running     = ref(false);
-    const error       = ref('');
-    let logPollTimer  = null;
+    const items          = ref([]);
+    const stats          = ref({ discovered: 0, pending_review: 0, generated: 0, published: 0, failed: 0, rejected: 0 });
+    const logs           = ref([]);
+    const statusFilter   = ref('');
+    const categoryFilter = ref('');
+    const reviewFilter   = ref('');
+    const searchQuery    = ref('');
+    const page           = ref(1);
+    const pageSize       = ref(20);
+    const total          = ref(0);
+    const totalPages     = ref(1);
+    const loading        = ref(true);
+    const running        = ref(false);
+    const error          = ref('');
+    const selectedIds    = ref([]);
+
+    const engine = reactive({
+      isPaused: false,
+      isRunning: false,
+      inWindow: false,
+      currentWindow: null,
+      nextWindow: '08:00 - 09:00 WAT',
+      currentTimeWat: '',
+      windows: ['08:00 - 09:00 WAT', '13:00 - 14:00 WAT', '19:00 - 20:00 WAT', '00:00 - 01:00 WAT'],
+    });
+
+    const previewModal = reactive({
+      show: false,
+      item: null,
+    });
+
+    let logPollTimer    = null;
+    let enginePollTimer = null;
+
+    const fetchEngineStatus = async () => {
+      try {
+        const res = await api.get('/api/newsroom/status');
+        Object.assign(engine, res);
+        running.value = !!res.isRunning;
+      } catch {}
+    };
 
     const fetchLogs = async () => {
       try {
@@ -1177,21 +1214,36 @@ export const AdminNewsroom = defineComponent({
       loading.value = true;
       error.value   = '';
       try {
-        const q = statusFilter.value ? `&status=${statusFilter.value}` : '';
+        const params = new URLSearchParams();
+        params.append('page', page.value);
+        params.append('pageSize', pageSize.value);
+        if (statusFilter.value) params.append('status', statusFilter.value);
+        if (categoryFilter.value) params.append('category', categoryFilter.value);
+        if (reviewFilter.value) params.append('review', reviewFilter.value);
+        if (searchQuery.value && searchQuery.value.trim()) params.append('q', searchQuery.value.trim());
+
         const [itemsRes, statsRes] = await Promise.all([
-          api.get(`/api/newsroom/items?pageSize=50${q}`),
+          api.get(`/api/newsroom/items?${params.toString()}`),
           api.get('/api/newsroom/stats'),
         ]);
-        items.value = itemsRes.items || [];
+
+        items.value      = itemsRes.items || [];
+        total.value      = itemsRes.total || 0;
+        totalPages.value = itemsRes.totalPages || 1;
         stats.value = {
-          discovered:    statsRes.discovered    || 0,
+          discovered:     statsRes.discovered     || 0,
           pending_review: statsRes.pending_review || 0,
-          generated:     statsRes.generated     || 0,
-          published:     statsRes.published     || 0,
-          failed:        statsRes.failed        || 0,
-          rejected:      statsRes.rejected      || 0,
+          generated:      statsRes.generated      || 0,
+          published:      statsRes.published      || 0,
+          failed:         statsRes.failed         || 0,
+          rejected:       statsRes.rejected       || 0,
         };
-        await fetchLogs();
+
+        // Filter out selected IDs that are no longer in items
+        const currentItemIds = new Set(items.value.map((i) => i.id));
+        selectedIds.value = selectedIds.value.filter((id) => currentItemIds.has(id));
+
+        await Promise.all([fetchLogs(), fetchEngineStatus()]);
       } catch (e) {
         error.value = e.message || 'Failed to load newsroom data.';
       } finally {
@@ -1201,16 +1253,117 @@ export const AdminNewsroom = defineComponent({
 
     onMounted(() => {
       load();
-      // Periodically refresh logs
-      logPollTimer = setInterval(fetchLogs, 5000);
+      logPollTimer    = setInterval(fetchLogs, 5000);
+      enginePollTimer = setInterval(fetchEngineStatus, 10000);
     });
 
     onUnmounted(() => {
       if (logPollTimer) clearInterval(logPollTimer);
+      if (enginePollTimer) clearInterval(enginePollTimer);
     });
 
-    watch(statusFilter, load);
+    watch([statusFilter, categoryFilter, reviewFilter, pageSize], () => {
+      page.value = 1;
+      load();
+    });
 
+    // Pagination handlers
+    const prevPage = () => {
+      if (page.value > 1) {
+        page.value--;
+        load();
+      }
+    };
+    const nextPage = () => {
+      if (page.value < totalPages.value) {
+        page.value++;
+        load();
+      }
+    };
+    const goToPage = (p) => {
+      if (p >= 1 && p <= totalPages.value) {
+        page.value = p;
+        load();
+      }
+    };
+
+    // Engine controls
+    const toggleEnginePause = () => {
+      if (engine.isPaused) {
+        confirmDialog({
+          header: 'Resume AI Newsroom Engine',
+          message: 'Resume automatic story discovery? The engine will scan during active operating windows (08-09, 13-14, 19-20, 00-01 WAT).',
+          icon: 'pi pi-play',
+          acceptSeverity: 'primary',
+          acceptLabel: 'Resume Engine',
+          onAccept: async () => {
+            try {
+              const res = await api.post('/api/newsroom/engine/resume');
+              Object.assign(engine, res.status || {});
+              notify.success('Engine Resumed', 'Automatic story scanning is active for scheduled windows.');
+              await fetchEngineStatus();
+            } catch (e) {
+              notify.error('Resume Failed', e.message);
+            }
+          },
+        });
+      } else {
+        confirmDialog({
+          header: 'Pause AI Newsroom Engine',
+          message: 'Pause automatic story discovery indefinitely? All background interval scans will halt until you resume.',
+          icon: 'pi pi-pause',
+          acceptSeverity: 'warn',
+          acceptLabel: 'Pause Indefinitely',
+          onAccept: async () => {
+            try {
+              const res = await api.post('/api/newsroom/engine/pause');
+              Object.assign(engine, res.status || {});
+              notify.warn('Engine Paused', 'AI discovery paused indefinitely. You can still trigger manual scans.');
+              await fetchEngineStatus();
+            } catch (e) {
+              notify.error('Pause Failed', e.message);
+            }
+          },
+        });
+      }
+    };
+
+    const stopScan = () => {
+      confirmDialog({
+        header: 'Stop Active Scan',
+        message: 'Abort the newsroom scan currently in progress?',
+        icon: 'pi pi-stop-circle',
+        acceptSeverity: 'danger',
+        acceptLabel: 'Abort Scan',
+        onAccept: async () => {
+          try {
+            await api.post('/api/newsroom/engine/stop');
+            notify.info('Stop Signal Sent', 'Ongoing news scan has been instructed to cancel.');
+            await fetchEngineStatus();
+          } catch (e) {
+            notify.error('Stop Failed', e.message);
+          }
+        },
+      });
+    };
+
+    const runNow = async () => {
+      running.value = true;
+      try {
+        const res = await api.post('/api/newsroom/run');
+        notify.info(
+          'AI Newsroom Scan Started',
+          res.message || 'Scanning news sources and processing candidates in background. Live output below.'
+        );
+        await Promise.all([fetchLogs(), fetchEngineStatus()]);
+      } catch (e) {
+        notify.error('Scan Failed', e.message || 'Could not start newsroom scan. Check GEMINI_API_KEY.');
+      } finally {
+        setTimeout(() => { running.value = false; load(); }, 4000);
+      }
+    };
+
+    // Story actions
     const approve = (item) => {
       confirmDialog({
         header: 'Publish Story Live',
@@ -1228,6 +1381,9 @@ export const AdminNewsroom = defineComponent({
               slug ? `/news/${slug}` : '',
               'View Article on Site'
             );
+            if (previewModal.show && previewModal.item?.id === item.id) {
+              previewModal.show = false;
+            }
             await load();
           } catch (e) {
             notify.error('Publish Failed', e.message || 'Could not approve and publish article.');
@@ -1247,6 +1403,9 @@ export const AdminNewsroom = defineComponent({
           try {
             await api.post(`/api/newsroom/items/${item.id}/reject`);
             notify.info('Story Rejected', 'The news item has been marked as rejected and archived.');
+            if (previewModal.show && previewModal.item?.id === item.id) {
+              previewModal.show = false;
+            }
             await load();
           } catch (e) {
             notify.error('Action Failed', e.message || 'Could not reject item.');
@@ -1255,31 +1414,204 @@ export const AdminNewsroom = defineComponent({
       });
     };
 
-    const runNow = async () => {
-      running.value = true;
-      try {
-        const res = await api.post('/api/newsroom/run');
-        notify.info(
-          'AI Newsroom Scan Started',
-          res.message || 'Scanning news sources and processing candidates in background. Live output below.'
-        );
-        await fetchLogs();
-      } catch (e) {
-        notify.error('Scan Failed', e.message || 'Could not start newsroom scan. Check GEMINI_API_KEY.');
-      } finally {
-        setTimeout(() => { running.value = false; load(); }, 4000);
+    const deleteItem = (item) => {
+      confirmDialog({
+        header: 'Delete Newsroom Item',
+        message: `Permanently delete "${item.sourceTitle || item.sourceName}" from the newsroom records?`,
+        icon: 'pi pi-trash',
+        acceptSeverity: 'danger',
+        acceptLabel: 'Delete Permanently',
+        onAccept: async () => {
+          try {
+            await api.del(`/api/newsroom/items/${item.id}`);
+            notify.success('Item Deleted', 'The newsroom item was permanently deleted.');
+            if (previewModal.show && previewModal.item?.id === item.id) {
+              previewModal.show = false;
+            }
+            await load();
+          } catch (e) {
+            notify.error('Delete Failed', e.message);
+          }
+        },
+      });
+    };
+
+    // Batch Actions
+    const isAllSelected = computed(() => {
+      if (!items.value.length) return false;
+      return items.value.every((i) => selectedIds.value.includes(i.id));
+    });
+
+    const toggleSelectAll = () => {
+      if (isAllSelected.value) {
+        selectedIds.value = [];
+      } else {
+        selectedIds.value = items.value.map((i) => i.id);
       }
+    };
+
+    const toggleSelect = (id) => {
+      const idx = selectedIds.value.indexOf(id);
+      if (idx === -1) {
+        selectedIds.value.push(id);
+      } else {
+        selectedIds.value.splice(idx, 1);
+      }
+    };
+
+    const batchPublish = () => {
+      const count = selectedIds.value.length;
+      if (!count) return;
+
+      confirmDialog({
+        header: `Publish ${count} Stories Live`,
+        message: `Publish all ${count} selected stories live to Jigawa Times? They will appear immediately on the homepage and respective categories.`,
+        icon: 'pi pi-cloud-upload',
+        acceptSeverity: 'success',
+        acceptLabel: `Publish ${count} Stories`,
+        onAccept: async () => {
+          try {
+            const res = await api.post('/api/newsroom/batch/approve', { ids: selectedIds.value });
+            notify.success('Batch Published Live', `Successfully published ${res.successful} stories (${res.failed} failed).`);
+            selectedIds.value = [];
+            await load();
+          } catch (e) {
+            notify.error('Batch Publish Failed', e.message);
+          }
+        },
+      });
+    };
+
+    const batchReject = () => {
+      const count = selectedIds.value.length;
+      if (!count) return;
+
+      confirmDialog({
+        header: `Reject ${count} Stories`,
+        message: `Mark all ${count} selected stories as rejected and archive their linked drafts?`,
+        icon: 'pi pi-box-archive',
+        acceptSeverity: 'warn',
+        acceptLabel: `Reject ${count} Stories`,
+        onAccept: async () => {
+          try {
+            const res = await api.post('/api/newsroom/batch/reject', { ids: selectedIds.value });
+            notify.info('Batch Rejected', `Marked ${res.successful} stories as rejected.`);
+            selectedIds.value = [];
+            await load();
+          } catch (e) {
+            notify.error('Batch Reject Failed', e.message);
+          }
+        },
+      });
+    };
+
+    const batchDelete = () => {
+      const count = selectedIds.value.length;
+      if (!count) return;
+
+      confirmDialog({
+        header: `Delete ${count} Stories Permanently`,
+        message: `Permanently delete ${count} selected newsroom records? This action cannot be undone.`,
+        icon: 'pi pi-trash',
+        acceptSeverity: 'danger',
+        acceptLabel: `Delete ${count} Items`,
+        onAccept: async () => {
+          try {
+            const res = await api.post('/api/newsroom/batch/delete', { ids: selectedIds.value });
+            notify.success('Batch Deleted', `Deleted ${res.deleted || count} newsroom records.`);
+            selectedIds.value = [];
+            await load();
+          } catch (e) {
+            notify.error('Batch Delete Failed', e.message);
+          }
+        },
+      });
+    };
+
+    const openPreview = (item) => {
+      previewModal.item = item;
+      previewModal.show = true;
     };
 
     const statusLabel = (s) => (s || '').replace(/_/g, ' ');
 
     return {
-      items, stats, logs, statusFilter, loading, running, error,
-      approve, reject, runNow, statusLabel, fetchLogs, timeAgo, load,
+      items, stats, logs, statusFilter, categoryFilter, reviewFilter, searchQuery,
+      page, pageSize, total, totalPages, loading, running, error,
+      engine, previewModal, selectedIds, isAllSelected,
+      load, prevPage, nextPage, goToPage,
+      toggleEnginePause, stopScan, runNow,
+      approve, reject, deleteItem, openPreview,
+      toggleSelectAll, toggleSelect,
+      batchPublish, batchReject, batchDelete,
+      statusLabel, fetchLogs, timeAgo,
     };
   },
   template: `
     <dash-shell title="AI Newsroom">
+      <!-- Enterprise Engine Control Card -->
+      <div style="background:var(--bg-1);border:1px solid var(--line);border-radius:var(--radius);padding:18px 22px;margin-bottom:var(--s6);box-shadow:var(--shadow-sm);">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:14px;">
+          <div style="display:flex;align-items:center;gap:14px;">
+            <!-- Status Icon Pill -->
+            <div :style="'width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;background:' + (running ? 'rgba(34,197,94,0.14)' : engine.isPaused ? 'rgba(234,179,8,0.14)' : engine.inWindow ? 'rgba(34,197,94,0.14)' : 'rgba(59,130,246,0.14)') + ';color:' + (running ? 'var(--green)' : engine.isPaused ? 'var(--amber)' : engine.inWindow ? 'var(--green)' : 'var(--blue)')">
+              <i :class="running ? 'pi pi-spin pi-spinner' : engine.isPaused ? 'pi pi-pause' : engine.inWindow ? 'pi pi-check-circle' : 'pi pi-clock'"></i>
+            </div>
+            <div>
+              <div style="display:flex;align-items:center;gap:8px;">
+                <h3 style="margin:0;font-size:16px;font-weight:700;">
+                  <span v-if="running" style="color:var(--green);">AI Engine Currently Scanning...</span>
+                  <span v-else-if="engine.isPaused" style="color:var(--amber);">AI Search Paused Indefinitely</span>
+                  <span v-else-if="engine.inWindow" style="color:var(--green);">Operational Window Active ({{ engine.currentWindow }})</span>
+                  <span v-else style="color:var(--blue);">Scheduled Standby (Next: {{ engine.nextWindow }})</span>
+                </h3>
+                <span v-if="engine.currentTimeWat" style="font-size:11px;font-weight:600;padding:2px 7px;border-radius:12px;background:var(--bg-3);color:var(--ink-3);">
+                  {{ engine.currentTimeWat }}
+                </span>
+              </div>
+              <p style="margin:4px 0 0 0;font-size:12px;color:var(--ink-3);line-height:1.4;">
+                Active Scan Intervals: <strong>08:00–09:00</strong> &bull; <strong>13:00–14:00</strong> &bull; <strong>19:00–20:00</strong> &bull; <strong>00:00–01:00 WAT</strong>.
+                <span v-if="engine.isPaused" style="color:var(--amber);font-weight:600;"> Auto-scan is halted.</span>
+              </p>
+            </div>
+          </div>
+
+          <!-- Quick Action Buttons -->
+          <div style="display:flex;align-items:center;gap:8px;">
+            <!-- Stop Running Scan -->
+            <button
+              v-if="running"
+              type="button"
+              class="btn sm danger"
+              @click="stopScan"
+              title="Stop ongoing scan">
+              <i class="pi pi-stop-circle" aria-hidden="true"></i> Stop Scan
+            </button>
+
+            <!-- Pause / Resume Toggle -->
+            <button
+              type="button"
+              :class="'btn sm ' + (engine.isPaused ? 'accent' : 'ghost')"
+              @click="toggleEnginePause"
+              :title="engine.isPaused ? 'Resume scheduled scanning' : 'Pause automatic searches indefinitely'">
+              <i :class="engine.isPaused ? 'pi pi-play' : 'pi pi-pause'" aria-hidden="true"></i>
+              {{ engine.isPaused ? 'Resume Engine' : 'Pause Engine' }}
+            </button>
+
+            <!-- Run Now Override -->
+            <button
+              type="button"
+              class="btn sm accent"
+              @click="runNow"
+              :disabled="running"
+              title="Trigger an immediate scan cycle right now">
+              <i :class="running ? 'pi pi-spin pi-spinner' : 'pi pi-bolt'" aria-hidden="true"></i>
+              {{ running ? 'Scanning…' : 'Run Now' }}
+            </button>
+          </div>
+        </div>
+      </div>
+
       <!-- Stats row -->
       <div class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr));margin-bottom:var(--s6);">
         <div class="stat-card">
@@ -1304,23 +1636,89 @@ export const AdminNewsroom = defineComponent({
         </div>
       </div>
 
-      <!-- Toolbar -->
-      <div class="filter-bar" style="display:flex;align-items:flex-end;gap:var(--s4);margin-bottom:var(--s5);flex-wrap:wrap;">
-        <div class="field" style="margin:0;flex:1;min-width:160px;">
-          <label for="nr-status-filter"><i class="fa-solid fa-filter" aria-hidden="true"></i> Filter by status</label>
-          <select id="nr-status-filter" v-model="statusFilter">
-            <option value="">All statuses</option>
+      <!-- Filters & Search Toolbar -->
+      <div style="background:var(--bg-1);border:1px solid var(--line);border-radius:var(--radius);padding:14px 18px;margin-bottom:var(--s4);display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;">
+        <!-- Search -->
+        <div class="field" style="margin:0;flex:2;min-width:180px;">
+          <label style="font-size:12px;font-weight:600;"><i class="pi pi-search"></i> Search</label>
+          <input type="text" v-model="searchQuery" @keyup.enter="load" placeholder="Search headline or source..." style="padding:6px 10px;font-size:13px;width:100%;border:1px solid var(--line);border-radius:var(--radius);" />
+        </div>
+
+        <!-- Status Filter -->
+        <div class="field" style="margin:0;flex:1;min-width:140px;">
+          <label style="font-size:12px;font-weight:600;"><i class="pi pi-filter"></i> Status</label>
+          <select v-model="statusFilter" style="padding:6px 10px;font-size:13px;width:100%;border:1px solid var(--line);border-radius:var(--radius);">
+            <option value="">All Statuses</option>
             <option v-for="s in ['DISCOVERED','ANALYZING','PENDING_REVIEW','GENERATED','PUBLISHED','FAILED','REJECTED']" :key="s" :value="s">{{ statusLabel(s) }}</option>
           </select>
         </div>
-        <div style="display:flex;gap:var(--s3);padding-bottom:1px;">
-          <button class="btn ghost" @click="load" :disabled="loading" title="Refresh">
-            <i :class="loading ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-rotate-right'" aria-hidden="true"></i>
+
+        <!-- Category Filter -->
+        <div class="field" style="margin:0;flex:1;min-width:130px;">
+          <label style="font-size:12px;font-weight:600;"><i class="pi pi-tag"></i> Category</label>
+          <select v-model="categoryFilter" style="padding:6px 10px;font-size:13px;width:100%;border:1px solid var(--line);border-radius:var(--radius);">
+            <option value="">All Categories</option>
+            <option value="jigawa">Jigawa</option>
+            <option value="buji">Buji</option>
+            <option value="politics">Politics</option>
+            <option value="business">Business</option>
+            <option value="education">Education</option>
+            <option value="investigations">Investigations</option>
+          </select>
+        </div>
+
+        <!-- Review Filter -->
+        <div class="field" style="margin:0;flex:1;min-width:130px;">
+          <label style="font-size:12px;font-weight:600;"><i class="pi pi-exclamation-triangle"></i> Review</label>
+          <select v-model="reviewFilter" style="padding:6px 10px;font-size:13px;width:100%;border:1px solid var(--line);border-radius:var(--radius);">
+            <option value="">All</option>
+            <option value="true">Review Required</option>
+            <option value="false">Standard</option>
+          </select>
+        </div>
+
+        <!-- Page Size -->
+        <div class="field" style="margin:0;width:100px;">
+          <label style="font-size:12px;font-weight:600;">Per Page</label>
+          <select v-model="pageSize" style="padding:6px 10px;font-size:13px;width:100%;border:1px solid var(--line);border-radius:var(--radius);">
+            <option :value="10">10</option>
+            <option :value="20">20</option>
+            <option :value="50">50</option>
+            <option :value="100">100</option>
+          </select>
+        </div>
+
+        <!-- Action buttons -->
+        <div style="display:flex;gap:8px;">
+          <button class="btn ghost" @click="load" :disabled="loading" title="Refresh list">
+            <i :class="loading ? 'pi pi-spin pi-spinner' : 'pi pi-refresh'" aria-hidden="true"></i>
             Refresh
           </button>
-          <button class="btn accent" @click="runNow" :disabled="running">
-            <i :class="running ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-robot'" aria-hidden="true"></i>
-            {{ running ? 'Starting…' : 'Run Now' }}
+        </div>
+      </div>
+
+      <!-- Batch Actions Floating/Sticky Bar -->
+      <div
+        v-if="selectedIds.length > 0"
+        style="background:#0f172a;color:#f8fafc;padding:12px 20px;border-radius:var(--radius);margin-bottom:var(--s4);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;box-shadow:0 10px 25px -5px rgba(0,0,0,0.25);border:1px solid #334155;">
+        <div style="display:flex;align-items:center;gap:10px;font-size:13px;font-weight:600;">
+          <span style="background:#2563eb;color:#fff;padding:2px 8px;border-radius:12px;font-size:11px;">
+            {{ selectedIds.length }}
+          </span>
+          <span>Selected story items</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <button type="button" class="btn sm success" @click="batchPublish" style="background:#16a34a;color:#fff;font-weight:600;">
+            <i class="pi pi-cloud-upload"></i> Publish Selected
+          </button>
+          <button type="button" class="btn sm ghost" @click="batchReject" style="background:rgba(255,255,255,0.1);color:#f1f5f9;">
+            <i class="pi pi-box-archive"></i> Reject Selected
+          </button>
+          <button type="button" class="btn sm danger" @click="batchDelete">
+            <i class="pi pi-trash"></i> Delete Selected
+          </button>
+          <button type="button" class="btn sm ghost" @click="selectedIds = []" style="color:#94a3b8;">
+            Cancel
           </button>
         </div>
       </div>
@@ -1332,105 +1730,262 @@ export const AdminNewsroom = defineComponent({
 
       <!-- Items table -->
       <div v-if="loading" class="state-block">
-        <div class="state-icon"><i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i></div>
+        <div class="state-icon"><i class="pi pi-spin pi-spinner" style="font-size:28px;"></i></div>
         <p>Loading newsroom items&hellip;</p>
       </div>
       <div v-else-if="!items.length" class="state-block">
         <div class="state-icon" style="color:var(--ink-4);"><i class="fa-solid fa-robot" aria-hidden="true"></i></div>
         <h2>No items found</h2>
-        <p>Click <strong>Run Now</strong> to start an AI newsroom scan cycle.</p>
+        <p>Click <strong>Run Now</strong> to start an AI newsroom scan cycle or adjust filters.</p>
       </div>
       <div v-else class="table-wrap">
         <table aria-label="Newsroom items">
           <thead>
             <tr>
+              <th style="width:36px;text-align:center;">
+                <input type="checkbox" :checked="isAllSelected" @change="toggleSelectAll" title="Select all on this page" style="cursor:pointer;" />
+              </th>
+              <th style="width:70px;">Media</th>
               <th>Story</th>
               <th>Source</th>
               <th>Status</th>
               <th>Category</th>
               <th>Review?</th>
               <th>Discovered</th>
-              <th>Actions</th>
+              <th style="text-align:right;">Actions</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="item in items" :key="item.id">
-              <td class="td-title" style="max-width:280px;">
-                <a :href="item.sourceUrl" target="_blank" rel="noopener noreferrer" :title="item.sourceTitle || item.sourceName" style="font-weight:600;line-height:1.35;display:block;">
-                  {{ item.sourceTitle || item.sourceName }}
-                </a>
-                <!-- Live Article on Site Link -->
-                <div v-if="item.article && item.status === 'PUBLISHED'" style="margin-top:4px;">
-                  <a :href="'/news/' + item.article.slug" target="_blank" style="font-size:11px;font-weight:700;color:var(--green);display:inline-flex;align-items:center;gap:4px;background:rgba(34,197,94,0.12);padding:2px 7px;border-radius:4px;text-decoration:none;">
-                    <i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i> Live on Site
-                  </a>
-                </div>
-                <!-- Draft Article Link -->
-                <div v-else-if="item.article" style="margin-top:4px;">
-                  <router-link :to="'/reporter/edit/' + item.article.id" target="_blank" style="font-size:11px;font-weight:600;color:var(--accent);display:inline-flex;align-items:center;gap:4px;text-decoration:none;">
-                    <i class="fa-solid fa-pen-to-square" aria-hidden="true"></i> Edit Draft #{{ item.article.id }}
-                  </router-link>
-                </div>
-                <!-- Sourced Only Item -->
-                <div v-else style="margin-top:4px;font-size:11px;color:var(--ink-4);display:inline-flex;align-items:center;gap:4px;">
-                  <i class="fa-solid fa-satellite-dish" aria-hidden="true"></i> Sourced story
+            <tr v-for="item in items" :key="item.id" :style="selectedIds.includes(item.id) ? 'background:rgba(59,130,246,0.05);' : ''">
+              <!-- Checkbox -->
+              <td style="text-align:center;">
+                <input type="checkbox" :checked="selectedIds.includes(item.id)" @change="toggleSelect(item.id)" style="cursor:pointer;" />
+              </td>
+
+              <!-- Thumbnail Preview -->
+              <td>
+                <div style="width:60px;height:42px;border-radius:4px;overflow:hidden;background:var(--bg-3);display:flex;align-items:center;justify-content:center;">
+                  <img
+                    v-if="item.article?.featuredImage || item.rawData?.imageUrl"
+                    :src="item.article?.featuredImage || item.rawData?.imageUrl"
+                    alt=""
+                    style="width:100%;height:100%;object-fit:cover;"
+                    loading="lazy"
+                    @error="$event.target.style.display='none'" />
+                  <i v-else class="pi pi-image" style="color:var(--ink-4);font-size:16px;"></i>
                 </div>
               </td>
+
+              <!-- Story Title & Links -->
+              <td class="td-title" style="max-width:280px;">
+                <a href="#" @click.prevent="openPreview(item)" :title="item.sourceTitle || item.sourceName" style="font-weight:600;line-height:1.35;display:block;color:var(--ink);">
+                  {{ item.sourceTitle || item.sourceName }}
+                </a>
+                <div style="display:flex;align-items:center;gap:6px;margin-top:4px;flex-wrap:wrap;">
+                  <!-- Live Article Link -->
+                  <a
+                    v-if="item.article?.slug && item.status === 'PUBLISHED'"
+                    :href="'/news/' + item.article.slug"
+                    target="_blank"
+                    style="font-size:11px;font-weight:700;color:var(--green);display:inline-flex;align-items:center;gap:4px;background:rgba(34,197,94,0.12);padding:2px 7px;border-radius:4px;text-decoration:none;">
+                    <i class="pi pi-arrow-up-right" style="font-size:9px;"></i> Live on Site
+                  </a>
+                  <!-- Draft Article Link -->
+                  <router-link
+                    v-else-if="item.article?.id"
+                    :to="'/reporter/edit/' + item.article.id"
+                    target="_blank"
+                    style="font-size:11px;font-weight:600;color:var(--accent);display:inline-flex;align-items:center;gap:4px;text-decoration:none;">
+                    <i class="pi pi-pencil" style="font-size:9px;"></i> Edit Draft #{{ item.article.id }}
+                  </router-link>
+                  <!-- Sourced Only Item -->
+                  <span v-else style="font-size:11px;color:var(--ink-4);display:inline-flex;align-items:center;gap:4px;">
+                    <i class="pi pi-globe" style="font-size:9px;"></i> Sourced story
+                  </span>
+                  <!-- Quick Preview Button -->
+                  <button type="button" @click="openPreview(item)" style="background:none;border:none;color:var(--blue);font-size:11px;cursor:pointer;padding:0 4px;text-decoration:underline;">
+                    Preview
+                  </button>
+                </div>
+              </td>
+
               <td class="muted" style="font-size:var(--text-xs);">{{ item.sourceName }}</td>
               <td><span :class="'badge status-'+(item.status==='PENDING_REVIEW'?'IN_REVIEW':item.status==='PUBLISHED'?'PUBLISHED':item.status==='FAILED'?'ARCHIVED':'DRAFT')">{{ statusLabel(item.status) }}</span></td>
-              <td class="muted" style="font-size:var(--text-xs);">{{ item.category || '—' }}</td>
+              <td class="muted" style="font-size:var(--text-xs);text-transform:capitalize;">{{ item.category || '—' }}</td>
               <td>
                 <span v-if="item.reviewRequired" style="color:var(--amber);font-size:var(--text-xs);font-weight:700;display:inline-flex;align-items:center;gap:3px;">
-                  <i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i> Yes
+                  <i class="pi pi-exclamation-triangle" style="font-size:10px;"></i> Yes
                 </span>
                 <span v-else style="color:var(--ink-4);font-size:var(--text-xs);">—</span>
               </td>
               <td class="muted" style="white-space:nowrap;font-size:var(--text-xs);">{{ timeAgo(item.createdAt) }}</td>
-              <td>
-                <div class="action-btns" style="display:flex;align-items:center;gap:6px;">
+
+              <!-- Action Buttons -->
+              <td style="text-align:right;">
+                <div class="action-btns" style="display:inline-flex;align-items:center;gap:6px;">
+                  <!-- Preview button -->
+                  <button
+                    type="button"
+                    class="btn sm ghost"
+                    @click="openPreview(item)"
+                    title="Preview full article"
+                    style="padding:3px 7px;font-size:12px;">
+                    <i class="pi pi-eye"></i>
+                  </button>
+
                   <!-- Publish Button -->
                   <button
                     v-if="item.status !== 'PUBLISHED' && item.status !== 'REJECTED'"
+                    type="button"
                     class="btn sm accent"
                     @click="approve(item)"
                     title="Publish Live on Jigawa Times"
-                    style="padding:3px 10px;font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:5px;">
-                    <i class="fa-solid fa-cloud-arrow-up" aria-hidden="true"></i> Publish
+                    style="padding:3px 9px;font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:4px;">
+                    <i class="pi pi-cloud-upload"></i> Publish
                   </button>
+
                   <!-- Reject Button -->
                   <button
                     v-if="item.status !== 'REJECTED'"
+                    type="button"
                     class="btn sm ghost danger"
                     @click="reject(item)"
                     title="Reject & Archive"
-                    style="padding:3px 8px;font-size:12px;">
-                    <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+                    style="padding:3px 7px;font-size:12px;">
+                    <i class="pi pi-times"></i>
                   </button>
-                  <!-- View / Edit Link -->
-                  <a
-                    v-if="item.article?.slug && item.status === 'PUBLISHED'"
-                    class="btn sm ghost"
-                    :href="'/news/' + item.article.slug"
-                    target="_blank"
-                    title="View live article"
-                    style="padding:3px 8px;font-size:12px;color:var(--green);">
-                    <i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i>
-                  </a>
-                  <router-link
-                    v-else-if="item.article?.id"
-                    class="btn sm ghost"
-                    :to="'/reporter/edit/' + item.article.id"
-                    target="_blank"
-                    title="Edit draft"
-                    style="padding:3px 8px;font-size:12px;">
-                    <i class="fa-solid fa-pen" aria-hidden="true"></i>
-                  </router-link>
+
+                  <!-- Delete Button -->
+                  <button
+                    type="button"
+                    class="btn sm ghost danger"
+                    @click="deleteItem(item)"
+                    title="Delete item permanently"
+                    style="padding:3px 7px;font-size:12px;color:var(--red);">
+                    <i class="pi pi-trash"></i>
+                  </button>
                 </div>
               </td>
             </tr>
           </tbody>
         </table>
       </div>
+
+      <!-- Pagination Toolbar -->
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-top:var(--s5);padding-top:var(--s4);border-top:1px solid var(--line);">
+        <div style="font-size:12px;color:var(--ink-3);">
+          Showing <strong>{{ items.length ? (page - 1) * pageSize + 1 : 0 }}</strong> to <strong>{{ Math.min(page * pageSize, total) }}</strong> of <strong>{{ total }}</strong> stories
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <button
+            type="button"
+            class="btn sm ghost"
+            :disabled="page <= 1"
+            @click="prevPage"
+            style="padding:4px 10px;font-size:12px;">
+            <i class="pi pi-chevron-left"></i> Previous
+          </button>
+          <span style="font-size:12px;font-weight:600;padding:0 8px;">
+            Page {{ page }} of {{ totalPages }}
+          </span>
+          <button
+            type="button"
+            class="btn sm ghost"
+            :disabled="page >= totalPages"
+            @click="nextPage"
+            style="padding:4px 10px;font-size:12px;">
+            Next <i class="pi pi-chevron-right"></i>
+          </button>
+        </div>
+      </div>
+
+      <!-- Article Preview Modal -->
+      <Dialog
+        v-model:visible="previewModal.show"
+        modal
+        header="Article Preview"
+        :style="{ width: '90vw', maxWidth: '780px' }">
+        <div v-if="previewModal.item" style="display:flex;flex-direction:column;gap:16px;">
+          <!-- Featured Image -->
+          <div
+            v-if="previewModal.item.article?.featuredImage || previewModal.item.rawData?.imageUrl"
+            style="width:100%;height:320px;border-radius:8px;overflow:hidden;background:#000;">
+            <img
+              :src="previewModal.item.article?.featuredImage || previewModal.item.rawData?.imageUrl"
+              :alt="previewModal.item.sourceTitle"
+              style="width:100%;height:100%;object-fit:cover;" />
+          </div>
+          <div v-if="previewModal.item.article?.imageCaption" style="font-size:12px;color:var(--ink-3);font-style:italic;">
+            {{ previewModal.item.article.imageCaption }}
+          </div>
+
+          <!-- Metadata row -->
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <span class="badge" style="background:var(--accent);color:#fff;text-transform:uppercase;">
+              {{ previewModal.item.category || 'General' }}
+            </span>
+            <span :class="'badge status-'+(previewModal.item.status==='PENDING_REVIEW'?'IN_REVIEW':previewModal.item.status==='PUBLISHED'?'PUBLISHED':'DRAFT')">
+              {{ statusLabel(previewModal.item.status) }}
+            </span>
+            <span v-if="previewModal.item.reviewRequired" style="background:rgba(234,179,8,0.15);color:var(--amber);font-size:11px;font-weight:700;padding:2px 8px;border-radius:4px;">
+              <i class="pi pi-exclamation-triangle"></i> Review Required
+            </span>
+            <span style="font-size:12px;color:var(--ink-4);margin-left:auto;">
+              Source: <strong>{{ previewModal.item.sourceName }}</strong>
+            </span>
+          </div>
+
+          <!-- Title -->
+          <h2 style="font-size:22px;line-height:1.3;margin:0;">
+            {{ previewModal.item.article?.title || previewModal.item.sourceTitle }}
+          </h2>
+
+          <!-- Excerpt -->
+          <p v-if="previewModal.item.article?.excerpt" style="font-size:14px;color:var(--ink-2);font-weight:500;line-height:1.5;margin:0;border-left:3px solid var(--accent);padding-left:12px;">
+            {{ previewModal.item.article.excerpt }}
+          </p>
+
+          <!-- Article Content Body -->
+          <div
+            v-if="previewModal.item.article?.content"
+            v-html="previewModal.item.article.content"
+            style="font-size:14px;line-height:1.75;color:var(--ink);border-top:1px solid var(--line);padding-top:14px;">
+          </div>
+          <div v-else style="background:var(--bg-3);padding:14px;border-radius:6px;font-size:13px;color:var(--ink-3);">
+            <em>Full article has not been compiled yet. Click <strong>Publish Story</strong> to generate and publish this article immediately.</em>
+          </div>
+
+          <!-- Original Source URL Link -->
+          <div style="font-size:12px;color:var(--ink-4);border-top:1px solid var(--line);padding-top:10px;">
+            Original Source URL:
+            <a :href="previewModal.item.sourceUrl" target="_blank" rel="noopener noreferrer" style="color:var(--accent);word-break:break-all;">
+              {{ previewModal.item.sourceUrl }} <i class="pi pi-external-link" style="font-size:10px;"></i>
+            </a>
+          </div>
+        </div>
+
+        <template #footer>
+          <div style="display:flex;justify-content:flex-end;gap:10px;width:100%;">
+            <button type="button" class="btn sm ghost" @click="previewModal.show = false">
+              Close
+            </button>
+            <button
+              v-if="previewModal.item && previewModal.item.status !== 'REJECTED'"
+              type="button"
+              class="btn sm ghost danger"
+              @click="reject(previewModal.item)">
+              <i class="pi pi-times"></i> Reject Story
+            </button>
+            <button
+              v-if="previewModal.item && previewModal.item.status !== 'PUBLISHED'"
+              type="button"
+              class="btn sm accent"
+              @click="approve(previewModal.item)">
+              <i class="pi pi-cloud-upload"></i> Publish Story Live
+            </button>
+          </div>
+        </template>
+      </Dialog>
 
       <!-- Live Newsroom Logs Terminal -->
       <div style="margin-top:var(--s6);background:#181825;color:#cdd6f4;border-radius:var(--r-md);padding:var(--s4);font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;box-shadow:var(--shadow-sm);border:1px solid #313244;">
@@ -1444,7 +1999,7 @@ export const AdminNewsroom = defineComponent({
           </button>
         </div>
         <div style="max-height:220px;overflow-y:auto;line-height:1.6;">
-          <div v-if="!logs.length" style="color:#6c7086;font-style:italic;">No logs recorded yet. The scheduler will run every 30m, or click 'Run Now' above.</div>
+          <div v-if="!logs.length" style="color:#6c7086;font-style:italic;">No logs recorded yet. The scheduler will run during operational windows (08-09, 13-14, 19-20, 00-01 WAT), or click 'Run Now' above.</div>
           <div v-for="(l, i) in logs" :key="i" :style="{color: l.level === 'error' ? '#f38ba8' : l.level === 'warn' ? '#f9e2af' : '#a6e3a1', padding:'1px 0'}">
             <span style="color:#6c7086;">[{{ l.time ? l.time.split('T')[1].slice(0,8) : '' }}]</span> {{ l.message }}
           </div>
@@ -1454,8 +2009,8 @@ export const AdminNewsroom = defineComponent({
       <!-- AI disclosure note -->
       <p style="font-size:var(--text-xs);color:var(--ink-4);margin-top:var(--s5);line-height:1.6;">
         <i class="fa-solid fa-robot" aria-hidden="true"></i>
-        Articles generated by the AI Newsroom are prepared from publicly available sources.
-        All articles require editorial review before publication. High-risk stories (deaths, allegations, unconfirmed breaking news) are always flagged for manual review.
+        Articles generated by the AI Newsroom are prepared from verified public sources with authentic imagery.
+        All articles follow the Jigawa Times comprehensive editorial workflow. High-risk stories are always flagged for manual review.
       </p>
     </dash-shell>
   `,

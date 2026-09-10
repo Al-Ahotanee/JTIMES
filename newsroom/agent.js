@@ -952,6 +952,10 @@ async function processStory(item, aiClient, config, recentArticles, prismaClient
   }
 
   const image = await selectImage(enrichedItem, imageBrief, config);
+  if (image?.url) {
+    enrichedItem.imageUrl = image.url;
+    item.imageUrl = image.url;
+  }
 
   // --- Stage 8: Publish ---
   const payload = {

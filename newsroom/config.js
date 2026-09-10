@@ -69,10 +69,17 @@ const config = Object.freeze({
   aisFallbackProvider: optional('AI_FALLBACK_PROVIDER'),
 
   // -----------------------------------------------------------------------
-  // Image provider
-  // Leave IMAGE_PROVIDER empty to skip AI image generation entirely.
+  // Operational Windows (WAT / Africa/Lagos Timezone, UTC+1)
+  // Default windows: 08:00-09:00, 13:00-14:00, 19:00-20:00, 00:00-01:00
   // -----------------------------------------------------------------------
-  imageProvider: optional('IMAGE_PROVIDER'),
+  timezone: optional('NEWSROOM_TIMEZONE', 'Africa/Lagos'),
+  operationalHours: [0, 8, 13, 19],
+
+  // -----------------------------------------------------------------------
+  // Image provider
+  // Defaults to 'pollinations' for free, high-resolution 16:9 news imagery
+  // -----------------------------------------------------------------------
+  imageProvider: optional('IMAGE_PROVIDER', 'pollinations'),
   imageApiKey: optional('IMAGE_API_KEY'),
 
   // -----------------------------------------------------------------------

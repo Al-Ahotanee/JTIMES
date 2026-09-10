@@ -197,146 +197,319 @@ async function runWithConcurrency(tasks, limit, onItem) {
  *
  * @returns {Promise<object>} Summary statistics
  */
-async function runNewsroom() {
+async function runNewsroom(options = {}) {
+  const { force = false } = options;
+
+  if (_isRunning) {
+    logger.warn('Scan already in progress — skipping concurrent execution request.');
+    return { skipped: true, reason: 'already_running' };
+  }
+
+  if (_isPaused && !force) {
+    logger.info('Scan skipped: AI Newsroom search engine is paused by admin.');
+    return { skipped: true, reason: 'engine_paused' };
+  }
+
+  _isRunning = true;
+  _shouldAbortScan = false;
+  _lastRunTime = new Date().toISOString();
+
   const startTime = Date.now();
   logger.info('════════════════════════════════════════');
-  logger.info(`Scan started at ${new Date().toISOString()}`);
+  logger.info(`Scan started at ${_lastRunTime} (Force: ${force})`);
   logger.info(`Mode: ${config.mode} | Dry-run: ${config.dryRun} | Model: ${config.geminiModel}`);
   logger.info('════════════════════════════════════════');
 
-  // --- Check AI is configured ---
-  let aiClient;
   try {
-    aiClient = createAiClient(config);
-  } catch (err) {
-    logger.error(`AI client init failed: ${err.message}`);
-    logger.error('Please set GEMINI_API_KEY in your environment variables.');
-    return { error: err.message };
-  }
+    // --- Check AI is configured ---
+    let aiClient;
+    try {
+      aiClient = createAiClient(config);
+    } catch (err) {
+      logger.error(`AI client init failed: ${err.message}`);
+      logger.error('Please set GEMINI_API_KEY in your environment variables.');
+      return { error: err.message };
+    }
 
-  const token = config.apiToken || null;
+    const token = config.apiToken || null;
 
-  // --- Stage 1: Discover ---
-  const { items: rawItems, stats: discoverStats } = await discoverStories(SOURCES);
-  logger.info(`${rawItems.length} stories discovered from ${discoverStats.sourcesAttempted} sources (${discoverStats.sourcesFailed} unreachable)`);
+    // --- Stage 1: Discover ---
+    const { items: rawItems, stats: discoverStats } = await discoverStories(SOURCES);
+    logger.info(`${rawItems.length} stories discovered from ${discoverStats.sourcesAttempted} sources (${discoverStats.sourcesFailed} unreachable)`);
 
-  if (rawItems.length === 0) {
-    logger.warn('No stories found from configured RSS sources. Exiting scan.');
-    return { discovered: 0, processed: 0, published: 0, failed: 0 };
-  }
+    if (rawItems.length === 0) {
+      logger.warn('No stories found from configured RSS sources. Exiting scan.');
+      return { discovered: 0, processed: 0, published: 0, failed: 0 };
+    }
 
-  // --- Stage 2: Deduplicate ---
-  const [knownHashes, recentArticles] = await Promise.all([
-    getKnownHashes(config.apiUrl, token),
-    getRecentArticles(config.apiUrl, token),
-  ]);
+    if (_shouldAbortScan) {
+      logger.info('Scan aborted by admin after discovery stage.');
+      return { discovered: rawItems.length, aborted: true };
+    }
 
-  const { unique: candidates, duplicatesSkipped: cheapDupes } = await deduplicateItems(
-    rawItems,
-    knownHashes,
-    recentArticles,
-    async () => false  // AI semantic dedup handled inside processStory
-  );
-  logger.info(`${cheapDupes} duplicates skipped (hash/keyword); ${candidates.length} candidate stories available`);
+    // --- Stage 2: Deduplicate ---
+    const [knownHashes, recentArticles] = await Promise.all([
+      getKnownHashes(config.apiUrl, token),
+      getRecentArticles(config.apiUrl, token),
+    ]);
 
-  if (candidates.length === 0) {
-    logger.info('All discovered stories are already in the system. Scan complete.');
-    return { discovered: rawItems.length, duplicatesSkipped: cheapDupes, processed: 0, published: 0 };
-  }
+    const { unique: candidates, duplicatesSkipped: cheapDupes } = await deduplicateItems(
+      rawItems,
+      knownHashes,
+      recentArticles,
+      async () => false  // AI semantic dedup handled inside processStory
+    );
+    logger.info(`${cheapDupes} duplicates skipped (hash/keyword); ${candidates.length} candidate stories available`);
 
-  // Prioritize candidates: Jigawa first, then Nigeria, then World
-  const regionWeights = { jigawa: 1, nigeria: 2, world: 3 };
-  candidates.sort((a, b) => (regionWeights[a.region] || 2) - (regionWeights[b.region] || 2));
+    if (candidates.length === 0) {
+      logger.info('All discovered stories are already in the system. Scan complete.');
+      return { discovered: rawItems.length, duplicatesSkipped: cheapDupes, processed: 0, published: 0 };
+    }
 
-  // Limit candidates per run to avoid hitting Gemini free-tier rate limits
-  const maxStories = config.maxItemsPerRun || 8;
-  const prioritizedCandidates = candidates.slice(0, maxStories);
-  logger.info(`Selected top ${prioritizedCandidates.length} stories for this scan (Jigawa prioritized) from ${candidates.length} candidates`);
+    // Prioritize candidates: Jigawa first, then Nigeria, then World
+    const regionWeights = { jigawa: 1, nigeria: 2, world: 3 };
+    candidates.sort((a, b) => (regionWeights[a.region] || 2) - (regionWeights[b.region] || 2));
 
-  // --- Stages 3–8: Process candidates with controlled concurrency ---
-  const stats = { processed: 0, published: 0, pendingReview: 0, skipped: 0, failed: 0, dryRun: 0 };
+    // Limit candidates per run to avoid hitting Gemini free-tier rate limits
+    const maxStories = config.maxItemsPerRun || 8;
+    const prioritizedCandidates = candidates.slice(0, maxStories);
+    logger.info(`Selected top ${prioritizedCandidates.length} stories for this scan (Jigawa prioritized) from ${candidates.length} candidates`);
 
-  await runWithConcurrency(prioritizedCandidates, config.concurrency, async (item) => {
-    stats.processed++;
-    logger.info(`Analyzing (${stats.processed}/${prioritizedCandidates.length}): "${item.title.slice(0, 60)}..." [${item.sourceName}]`);
+    // --- Stages 3–8: Process candidates with controlled concurrency ---
+    const stats = { processed: 0, published: 0, pendingReview: 0, skipped: 0, failed: 0, dryRun: 0 };
 
-    const result = await processStory(item, aiClient, config, recentArticles, prismaClient);
-
-    switch (result.status) {
-      case 'PUBLISHED':
-        stats.published++;
-        logger.info(`[PUBLISHED] Story created & published: ${item.title}`);
-        break;
-      case 'SUBMITTED':
-      case 'DRAFT':
-      case 'PENDING_REVIEW':
-        stats.pendingReview++;
-        logger.info(`[PENDING REVIEW] Story prepared for editor review: ${item.title}`);
-        break;
-      case 'SKIPPED':
-      case 'DUPLICATE':
+    await runWithConcurrency(prioritizedCandidates, config.concurrency, async (item) => {
+      if (_shouldAbortScan) {
+        logger.info(`Scan aborted by admin: skipping "${item.title.slice(0, 40)}"`);
         stats.skipped++;
-        break;
-      case 'DRY_RUN':
-        stats.dryRun++;
-        logger.info(`[DRY RUN] Article prepared (not published): ${item.title}`);
-        break;
-      case 'FAILED':
-      default:
-        stats.failed++;
-        logger.warn(`[FAILED] Processing failed for: ${item.title} (${result.reason || 'unknown'})`);
-        break;
-    }
+        return { status: 'SKIPPED', reason: 'scan_aborted' };
+      }
 
-    // Persist to newsroom_items
-    if (!config.dryRun) {
-      await saveNewsroomItem(config.apiUrl, token, item, result.status, result.articleId);
-    }
+      stats.processed++;
+      logger.info(`Analyzing (${stats.processed}/${prioritizedCandidates.length}): "${item.title.slice(0, 60)}..." [${item.sourceName}]`);
 
-    return result;
-  });
+      const result = await processStory(item, aiClient, config, recentArticles, prismaClient);
 
-  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-  logger.info('════════════════════════════════════════');
-  logger.info(`Scan complete in ${elapsed}s`);
-  logger.info(`Discovered: ${rawItems.length} | Duplicates skipped: ${cheapDupes}`);
-  logger.info(`Analyzed: ${candidates.length} | Published: ${stats.published} | Review Required: ${stats.pendingReview} | Dry Run: ${stats.dryRun} | Failed: ${stats.failed}`);
-  logger.info('════════════════════════════════════════');
+      switch (result.status) {
+        case 'PUBLISHED':
+          stats.published++;
+          logger.info(`[PUBLISHED] Story created & published: ${item.title}`);
+          break;
+        case 'SUBMITTED':
+        case 'DRAFT':
+        case 'PENDING_REVIEW':
+          stats.pendingReview++;
+          logger.info(`[PENDING REVIEW] Story prepared for editor review: ${item.title}`);
+          break;
+        case 'SKIPPED':
+        case 'DUPLICATE':
+          stats.skipped++;
+          break;
+        case 'DRY_RUN':
+          stats.dryRun++;
+          logger.info(`[DRY RUN] Article prepared (not published): ${item.title}`);
+          break;
+        case 'FAILED':
+        default:
+          stats.failed++;
+          logger.warn(`[FAILED] Processing failed for: ${item.title} (${result.reason || 'unknown'})`);
+          break;
+      }
 
-  return { discovered: rawItems.length, duplicatesSkipped: cheapDupes, ...stats };
+      // Persist to newsroom_items
+      if (!config.dryRun) {
+        await saveNewsroomItem(config.apiUrl, token, item, result.status, result.articleId);
+      }
+
+      return result;
+    });
+
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    logger.info('════════════════════════════════════════');
+    logger.info(`Scan complete in ${elapsed}s`);
+    logger.info(`Discovered: ${rawItems.length} | Duplicates skipped: ${cheapDupes}`);
+    logger.info(`Analyzed: ${candidates.length} | Published: ${stats.published} | Review Required: ${stats.pendingReview} | Dry Run: ${stats.dryRun} | Failed: ${stats.failed}`);
+    logger.info('════════════════════════════════════════');
+
+    return { discovered: rawItems.length, duplicatesSkipped: cheapDupes, ...stats };
+  } finally {
+    _isRunning = false;
+    _shouldAbortScan = false;
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Scheduler (runs inside the existing Express process)
+// Scheduler & Operational Windows (WAT / Africa/Lagos Timezone, UTC+1)
+// Scheduled windows: 08:00-09:00, 13:00-14:00, 19:00-20:00, 00:00-01:00
 // ---------------------------------------------------------------------------
 
-let _schedulerTimer = null;
+let _schedulerTimer  = null;
+let _isRunning       = false;
+let _isPaused        = false;
+let _shouldAbortScan = false;
+let _lastRunTime     = null;
+let _lastWindowRun   = null;
+
+function getWatDate() {
+  const now = new Date();
+  try {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: config.timezone || 'Africa/Lagos',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
+    const parts = formatter.formatToParts(now);
+    const get = (t) => parts.find((p) => p.type === t)?.value || '00';
+    const hour = parseInt(get('hour'), 10);
+    const minute = parseInt(get('minute'), 10);
+    const timeStr = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} WAT`;
+    return { hour, minute, timeStr, dateKey: `${get('year')}-${get('month')}-${get('day')}` };
+  } catch {
+    // Fallback: UTC+1
+    const utcHour = (now.getUTCHours() + 1) % 24;
+    const utcMin  = now.getUTCMinutes();
+    return {
+      hour: utcHour,
+      minute: utcMin,
+      timeStr: `${String(utcHour).padStart(2, '0')}:${String(utcMin).padStart(2, '0')} WAT`,
+      dateKey: now.toISOString().slice(0, 10),
+    };
+  }
+}
+
+function isWithinOperationalWindow() {
+  const { hour } = getWatDate();
+  const hours = config.operationalHours || [0, 8, 13, 19];
+  return hours.includes(hour);
+}
+
+function getWindowInfo() {
+  const { hour, timeStr } = getWatDate();
+  const hours = config.operationalHours || [0, 8, 13, 19];
+  const inWindow = hours.includes(hour);
+  const currentWindow = inWindow ? `${String(hour).padStart(2, '0')}:00 - ${String((hour + 1) % 24).padStart(2, '0')}:00 WAT` : null;
+
+  let nextHour = hours.find((h) => h > hour);
+  if (nextHour === undefined) nextHour = hours[0];
+  const nextWindow = `${String(nextHour).padStart(2, '0')}:00 - ${String((nextHour + 1) % 24).padStart(2, '0')}:00 WAT`;
+
+  return {
+    inWindow,
+    currentWindow,
+    nextWindow,
+    currentTimeWat: timeStr,
+    windows: ['08:00 - 09:00 WAT', '13:00 - 14:00 WAT', '19:00 - 20:00 WAT', '00:00 - 01:00 WAT'],
+  };
+}
+
+async function initPauseState() {
+  if (prismaClient) {
+    try {
+      const setting = await prismaClient.siteSetting.findUnique({
+        where: { key: 'newsroom_engine_paused' },
+      });
+      if (setting) {
+        _isPaused = setting.value === 'true';
+        logger.info(`Engine pause state initialized from database: ${_isPaused ? 'PAUSED' : 'ACTIVE'}`);
+      }
+    } catch (e) {
+      logger.warn(`Could not load engine pause state from DB: ${e.message}`);
+    }
+  }
+}
+
+async function pauseEngine(persist = true) {
+  _isPaused = true;
+  logger.info('AI Newsroom search engine PAUSED indefinitely by admin.');
+  if (persist && prismaClient) {
+    try {
+      await prismaClient.siteSetting.upsert({
+        where: { key: 'newsroom_engine_paused' },
+        update: { value: 'true' },
+        create: { key: 'newsroom_engine_paused', value: 'true' },
+      });
+    } catch (e) {
+      logger.warn(`Could not persist pause state: ${e.message}`);
+    }
+  }
+  return getEngineStatus();
+}
+
+async function resumeEngine(persist = true) {
+  _isPaused = false;
+  logger.info('AI Newsroom search engine RESUMED by admin.');
+  if (persist && prismaClient) {
+    try {
+      await prismaClient.siteSetting.upsert({
+        where: { key: 'newsroom_engine_paused' },
+        update: { value: 'false' },
+        create: { key: 'newsroom_engine_paused', value: 'false' },
+      });
+    } catch (e) {
+      logger.warn(`Could not persist resume state: ${e.message}`);
+    }
+  }
+  return getEngineStatus();
+}
+
+function stopRunningScan() {
+  if (_isRunning) {
+    _shouldAbortScan = true;
+    logger.info('Abort requested for current newsroom scan.');
+    return { ok: true, message: 'Scan cancellation requested.' };
+  }
+  return { ok: false, message: 'No scan is currently running.' };
+}
+
+function getEngineStatus() {
+  const win = getWindowInfo();
+  return {
+    isPaused: _isPaused,
+    isRunning: _isRunning,
+    inWindow: win.inWindow,
+    currentWindow: win.currentWindow,
+    nextWindow: win.nextWindow,
+    currentTimeWat: win.currentTimeWat,
+    windows: win.windows,
+    lastRunTime: _lastRunTime,
+  };
+}
 
 /**
  * Start the periodic newsroom scheduler.
- * Runs immediately once after a short 5s startup delay, then repeats every NEWSROOM_INTERVAL_MINUTES.
- * Call this from server.js after app.listen().
+ * Checks every 2 minutes whether the current WAT time falls into an active
+ * operational window (08:00-09:00, 13:00-14:00, 19:00-20:00, 00:00-01:00).
  */
-function startScheduler() {
-  const minutes = config.intervalMinutes;
-  if (!minutes || minutes <= 0) {
-    logger.info('Scheduler disabled (NEWSROOM_INTERVAL_MINUTES=0). Use `npm run newsroom` or UI to run manually.');
-    return;
-  }
+async function startScheduler() {
+  await initPauseState();
+  const win = getWindowInfo();
+  logger.info(`Scheduler started — Active windows: ${win.windows.join(', ')}`);
+  logger.info(`Current WAT Time: ${win.currentTimeWat} | Status: ${_isPaused ? 'PAUSED' : win.inWindow ? 'OPERATIONAL WINDOW ACTIVE' : `STANDBY (Next: ${win.nextWindow})`}`);
 
-  const ms = minutes * 60 * 1000;
-  logger.info(`Scheduler started — scheduled to run every ${minutes} minute(s)`);
+  // Periodic window check every 2 minutes
+  _schedulerTimer = setInterval(async () => {
+    if (_isPaused || _isRunning) return;
 
-  // Delay initial run by 5s so server completes port binding
-  setTimeout(() => {
-    logger.info('Starting initial background news scan on server boot...');
-    runNewsroom().catch((err) => logger.error('Initial news scan error:', err.message));
-  }, 5000);
+    const current = getWindowInfo();
+    if (!current.inWindow) return; // Outside active windows
 
-  _schedulerTimer = setInterval(() => {
-    logger.info('Starting scheduled background news scan...');
-    runNewsroom().catch((err) => logger.error('Scheduled news scan error:', err.message));
-  }, ms);
+    const { hour, dateKey } = getWatDate();
+    const windowKey = `${dateKey}:${hour}`;
+    if (_lastWindowRun === windowKey) return; // Already scanned in this window
+
+    _lastWindowRun = windowKey;
+    logger.info(`[WINDOW ACTIVE] Operating window ${current.currentWindow} active. Starting scheduled newsroom scan...`);
+    try {
+      await runNewsroom();
+    } catch (err) {
+      logger.error('[SCHEDULER] Scan error:', err.message);
+    }
+  }, 120000); // 2 minutes
 }
 
 /**
@@ -350,7 +523,16 @@ function stopScheduler() {
   }
 }
 
-module.exports = { runNewsroom, startScheduler, stopScheduler };
+module.exports = {
+  runNewsroom,
+  startScheduler,
+  stopScheduler,
+  pauseEngine,
+  resumeEngine,
+  stopRunningScan,
+  getEngineStatus,
+  isWithinOperationalWindow,
+};
 
 // ---------------------------------------------------------------------------
 // CLI entry point: node newsroom/index.js
