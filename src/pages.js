@@ -2,6 +2,7 @@ import { defineComponent, ref, reactive, computed, onMounted, onUnmounted, watch
 import { useRoute, useRouter } from 'vue-router';
 import { api } from './api.js';
 import { store } from './store.js';
+import { notify, confirmDialog } from './notifications.js';
 import {
   ArticleCard, ArticleListRow, Pagination,
   ShareButtons, CommentsBlock, ImageUploader, NewsletterBox,
@@ -906,9 +907,22 @@ export const AdminCategories = defineComponent({
     const load = async () => { items.value = (await api.get('/api/categories')).items; };
     onMounted(load);
     const remove = async (c) => {
-      if (confirm(`Delete "${c.name}"? Articles must be reassigned first.`)) {
-        try { await api.del(`/api/categories/${c.id}`); load(); } catch (e) { alert(e.message); }
-      }
+      confirmDialog({
+        header: 'Delete Category',
+        message: `Delete category "${c.name}"? Articles must be reassigned first.`,
+        icon: 'pi pi-trash',
+        acceptLabel: 'Delete Category',
+        acceptSeverity: 'danger',
+        onAccept: async () => {
+          try {
+            await api.del(`/api/categories/${c.id}`);
+            notify.success('Category Deleted', `"${c.name}" was removed.`);
+            load();
+          } catch (e) {
+            notify.error('Delete Failed', e.message);
+          }
+        },
+      });
     };
     return { items, load, remove };
   },
@@ -956,9 +970,60 @@ export const AdminArticles = defineComponent({
     };
     onMounted(load);
     watch(statusFilter, load);
-    const remove    = async (a) => { if (confirm(`Permanently delete "${a.title}"?`)) { await api.del(`/api/articles/${a.id}`); load(); } };
-    const publish   = async (a) => { try { await api.post(`/api/articles/${a.id}/publish`);   load(); } catch (e) { alert(e.message); } };
-    const unpublish = async (a) => { try { await api.post(`/api/articles/${a.id}/unpublish`); load(); } catch (e) { alert(e.message); } };
+    const remove = async (a) => {
+      confirmDialog({
+        header: 'Delete Article',
+        message: `Permanently delete "${a.title}"? This cannot be undone.`,
+        icon: 'pi pi-trash',
+        acceptLabel: 'Delete Permanently',
+        acceptSeverity: 'danger',
+        onAccept: async () => {
+          try {
+            await api.del(`/api/articles/${a.id}`);
+            notify.success('Article Deleted', `"${a.title}" has been removed.`);
+            load();
+          } catch (e) {
+            notify.error('Delete Failed', e.message);
+          }
+        },
+      });
+    };
+    const publish = async (a) => {
+      confirmDialog({
+        header: 'Publish Article Live',
+        message: `Publish "${a.title}" immediately to Jigawa Times?`,
+        icon: 'pi pi-cloud-upload',
+        acceptLabel: 'Publish Live',
+        acceptSeverity: 'success',
+        onAccept: async () => {
+          try {
+            await api.post(`/api/articles/${a.id}/publish`);
+            notify.success('Article Published!', `"${a.title}" is now live on the site.`, `/news/${a.slug}`, 'View Article on Site');
+            load();
+          } catch (e) {
+            notify.error('Publish Failed', e.message);
+          }
+        },
+      });
+    };
+    const unpublish = async (a) => {
+      confirmDialog({
+        header: 'Unpublish Article',
+        message: `Take "${a.title}" offline and return to draft?`,
+        icon: 'pi pi-eye-slash',
+        acceptLabel: 'Unpublish',
+        acceptSeverity: 'warn',
+        onAccept: async () => {
+          try {
+            await api.post(`/api/articles/${a.id}/unpublish`);
+            notify.info('Article Unpublished', `"${a.title}" was moved to drafts.`);
+            load();
+          } catch (e) {
+            notify.error('Unpublish Failed', e.message);
+          }
+        },
+      });
+    };
     return { items, statusFilter, loading, remove, publish, unpublish, timeAgo };
   },
   template: `
@@ -1146,89 +1211,45 @@ export const AdminNewsroom = defineComponent({
 
     watch(statusFilter, load);
 
-    // Professional Toast Notifications
-    const toast = reactive({
-      show: false,
-      type: 'success',
-      title: '',
-      message: '',
-      linkUrl: '',
-      linkText: '',
-    });
-    let toastTimer = null;
-    const showToast = (type, title, message, linkUrl = '', linkText = '') => {
-      if (toastTimer) clearTimeout(toastTimer);
-      Object.assign(toast, { show: true, type, title, message, linkUrl, linkText });
-      toastTimer = setTimeout(() => { toast.show = false; }, 8000);
-    };
-
-    // In-App Confirmation Modal (Replaces browser confirm)
-    const modal = reactive({
-      show: false,
-      title: '',
-      message: '',
-      icon: 'fa-cloud-arrow-up',
-      type: 'success',
-      confirmText: 'Publish Now',
-      action: null,
-      loading: false,
-    });
-
-    const openConfirm = ({ title, message, icon, type, confirmText, action }) => {
-      Object.assign(modal, { show: true, title, message, icon: icon || 'fa-cloud-arrow-up', type: type || 'success', confirmText: confirmText || 'Confirm', action, loading: false });
-    };
-
-    const executeModalAction = async () => {
-      if (!modal.action) { modal.show = false; return; }
-      modal.loading = true;
-      try {
-        await modal.action();
-      } finally {
-        modal.loading = false;
-        modal.show = false;
-      }
-    };
-
     const approve = (item) => {
-      openConfirm({
-        title: 'Publish Story Live',
+      confirmDialog({
+        header: 'Publish Story Live',
         message: `Publish "${item.sourceTitle || item.sourceName}" immediately to Jigawa Times? It will be visible to all readers on the homepage and news category.`,
-        icon: 'fa-cloud-arrow-up',
-        type: 'success',
-        confirmText: 'Approve & Publish',
-        action: async () => {
+        icon: 'pi pi-cloud-upload',
+        acceptSeverity: 'success',
+        acceptLabel: 'Approve & Publish',
+        onAccept: async () => {
           try {
             const res = await api.post(`/api/newsroom/items/${item.id}/approve`);
             const slug = res.articleSlug || res.item?.article?.slug || item.article?.slug;
-            showToast(
-              'success',
+            notify.success(
               'Story Published Live!',
-              `"${item.sourceTitle || item.sourceName}" is now published on Jigawa Times.`,
+              `"${item.sourceTitle || item.sourceName}" is now live on Jigawa Times.`,
               slug ? `/news/${slug}` : '',
               'View Article on Site'
             );
             await load();
           } catch (e) {
-            showToast('danger', 'Publish Failed', e.message || 'Could not approve and publish article.');
+            notify.error('Publish Failed', e.message || 'Could not approve and publish article.');
           }
         },
       });
     };
 
     const reject = (item) => {
-      openConfirm({
-        title: 'Reject Story',
+      confirmDialog({
+        header: 'Reject Story',
         message: `Reject "${item.sourceTitle || item.sourceName}"? Its linked draft article (if any) will be archived and removed from review.`,
-        icon: 'fa-box-archive',
-        type: 'danger',
-        confirmText: 'Reject & Archive',
-        action: async () => {
+        icon: 'pi pi-box-archive',
+        acceptSeverity: 'danger',
+        acceptLabel: 'Reject & Archive',
+        onAccept: async () => {
           try {
             await api.post(`/api/newsroom/items/${item.id}/reject`);
-            showToast('info', 'Story Rejected', 'The news item has been marked as rejected and archived.');
+            notify.info('Story Rejected', 'The news item has been marked as rejected and archived.');
             await load();
           } catch (e) {
-            showToast('danger', 'Action Failed', e.message || 'Could not reject item.');
+            notify.error('Action Failed', e.message || 'Could not reject item.');
           }
         },
       });
@@ -1238,14 +1259,13 @@ export const AdminNewsroom = defineComponent({
       running.value = true;
       try {
         const res = await api.post('/api/newsroom/run');
-        showToast(
-          'info',
+        notify.info(
           'AI Newsroom Scan Started',
           res.message || 'Scanning news sources and processing candidates in background. Live output below.'
         );
         await fetchLogs();
       } catch (e) {
-        showToast('danger', 'Scan Failed', e.message || 'Could not start newsroom scan. Check GEMINI_API_KEY.');
+        notify.error('Scan Failed', e.message || 'Could not start newsroom scan. Check GEMINI_API_KEY.');
       } finally {
         setTimeout(() => { running.value = false; load(); }, 4000);
       }
@@ -1255,55 +1275,11 @@ export const AdminNewsroom = defineComponent({
 
     return {
       items, stats, logs, statusFilter, loading, running, error,
-      approve, reject, runNow, statusLabel, fetchLogs, timeAgo,
-      toast, showToast, modal, executeModalAction,
+      approve, reject, runNow, statusLabel, fetchLogs, timeAgo, load,
     };
   },
   template: `
     <dash-shell title="AI Newsroom">
-      <!-- Professional Floating Toast Alert -->
-      <div v-if="toast.show" :style="'position:fixed;top:24px;right:24px;z-index:99999;min-width:320px;max-width:440px;background:var(--bg-1);border-radius:var(--radius);box-shadow:0 12px 36px rgba(0,0,0,0.18);border:1px solid var(--line);border-left:5px solid ' + (toast.type==='success'?'var(--green)':toast.type==='danger'?'var(--red)':'var(--accent)') + ';padding:14px 18px;display:flex;flex-direction:column;gap:6px;'">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
-          <div style="display:flex;align-items:center;gap:8px;font-weight:700;font-size:14px;">
-            <i v-if="toast.type==='success'" class="fa-solid fa-circle-check" style="color:var(--green);font-size:16px;" aria-hidden="true"></i>
-            <i v-else-if="toast.type==='danger'" class="fa-solid fa-triangle-exclamation" style="color:var(--red);font-size:16px;" aria-hidden="true"></i>
-            <i v-else class="fa-solid fa-circle-info" style="color:var(--accent);font-size:16px;" aria-hidden="true"></i>
-            <span>{{ toast.title }}</span>
-          </div>
-          <button type="button" @click="toast.show = false" style="background:none;border:none;color:var(--ink-4);cursor:pointer;font-size:14px;padding:2px 6px;">
-            <i class="fa-solid fa-xmark" aria-hidden="true"></i>
-          </button>
-        </div>
-        <p style="margin:0;font-size:13px;color:var(--ink-2);line-height:1.4;">{{ toast.message }}</p>
-        <div v-if="toast.linkUrl" style="margin-top:4px;">
-          <a :href="toast.linkUrl" target="_blank" style="font-size:12px;font-weight:700;color:var(--accent);display:inline-flex;align-items:center;gap:5px;">
-            {{ toast.linkText || 'View Article' }} <i class="fa-solid fa-arrow-up-right-from-square" style="font-size:11px;" aria-hidden="true"></i>
-          </a>
-        </div>
-      </div>
-
-      <!-- Confirmation Modal -->
-      <div v-if="modal.show" style="position:fixed;inset:0;background:rgba(0,0,0,0.55);backdrop-filter:blur(2px);z-index:99998;display:flex;align-items:center;justify-content:center;padding:16px;">
-        <div style="background:var(--bg-1);border:1px solid var(--line);border-radius:var(--radius);width:100%;max-width:440px;box-shadow:0 20px 40px rgba(0,0,0,0.25);overflow:hidden;">
-          <div style="padding:20px;display:flex;flex-direction:column;gap:12px;">
-            <div style="display:flex;align-items:center;gap:12px;">
-              <div :style="'width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;background:' + (modal.type==='danger'?'rgba(239,68,68,0.12)':'rgba(34,197,94,0.12)') + ';color:' + (modal.type==='danger'?'var(--red)':'var(--green)')">
-                <i :class="'fa-solid ' + modal.icon" aria-hidden="true"></i>
-              </div>
-              <h3 style="margin:0;font-size:16px;font-weight:700;">{{ modal.title }}</h3>
-            </div>
-            <p style="margin:0;font-size:13px;color:var(--ink-2);line-height:1.5;">{{ modal.message }}</p>
-          </div>
-          <div style="display:flex;justify-content:flex-end;gap:10px;padding:12px 20px;background:var(--bg-2);border-top:1px solid var(--line);">
-            <button type="button" class="btn ghost sm" :disabled="modal.loading" @click="modal.show = false">Cancel</button>
-            <button type="button" :class="'btn sm ' + (modal.type==='danger'?'danger':'accent')" :disabled="modal.loading" @click="executeModalAction">
-              <i :class="modal.loading ? 'fa-solid fa-spinner fa-spin' : ('fa-solid ' + modal.icon)" aria-hidden="true"></i>
-              {{ modal.loading ? 'Processing…' : modal.confirmText }}
-            </button>
-          </div>
-        </div>
-      </div>
-
       <!-- Stats row -->
       <div class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr));margin-bottom:var(--s6);">
         <div class="stat-card">
@@ -1350,9 +1326,9 @@ export const AdminNewsroom = defineComponent({
       </div>
 
       <!-- Error banner if load failed -->
-      <div v-if="error" class="form-error" style="margin-bottom:var(--s4);display:flex;align-items:center;gap:8px;">
-        <i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i> {{ error }}
-      </div>
+      <Message v-if="error" severity="error" icon="pi pi-exclamation-triangle" style="margin-bottom:var(--s4);">
+        {{ error }}
+      </Message>
 
       <!-- Items table -->
       <div v-if="loading" class="state-block">
@@ -1500,8 +1476,14 @@ export const EditorQueue = defineComponent({
     };
     onMounted(load);
     const act = async (a, action) => {
-      try { await api.post(`/api/articles/${a.id}/${action}`); load(); }
-      catch (e) { alert(e.message); }
+      try {
+        await api.post(`/api/articles/${a.id}/${action}`);
+        notify.success('Editorial Action Completed', `Article moved to ${action.replace(/-/g, ' ')}.`);
+        load();
+      }
+      catch (e) {
+        notify.error('Action Failed', e.message);
+      }
     };
     return { groups, act, timeAgo };
   },
@@ -1579,13 +1561,23 @@ export const ReporterHome = defineComponent({
     });
     const submitForReview = async (a) => {
       if (!a || !a.id) return;
-      try {
-        await api.post(`/api/articles/${a.id}/submit`);
-        const res = await api.get('/api/articles?mine=true&pageSize=50');
-        items.value = res?.items || [];
-      } catch (e) {
-        alert(e.message || 'Could not submit story for review.');
-      }
+      confirmDialog({
+        header: 'Submit for Review',
+        message: `Submit "${a.title}" to editors for review?`,
+        icon: 'pi pi-send',
+        acceptLabel: 'Submit Story',
+        acceptSeverity: 'primary',
+        onAccept: async () => {
+          try {
+            await api.post(`/api/articles/${a.id}/submit`);
+            notify.success('Story Submitted', `"${a.title}" was submitted to editors.`);
+            const res = await api.get('/api/articles?mine=true&pageSize=50');
+            items.value = res?.items || [];
+          } catch (e) {
+            notify.error('Submission Failed', e.message || 'Could not submit story for review.');
+          }
+        },
+      });
     };
     const counts = computed(() => {
       const c = { total: items.value.length, published: 0, views: 0, drafts: 0 };
