@@ -340,15 +340,15 @@ function selectBestGeminiModel(availableModels, preferredModel) {
   if (prefixMatch) return prefixMatch;
 
   const priorities = [
-    'gemini-3.6-flash',
+    'gemini-3.5-flash',
+    'gemini-flash-lite-latest',
+    'gemini-3.1-flash-lite',
     'gemini-3.7-flash',
     'gemini-3.8-flash',
-    'gemini-2.5-flash',
+    'gemini-3.5-flash-lite',
+    'gemini-3-flash-preview',
     'gemini-flash-latest',
-    'gemini-2.0-flash',
-    'gemini-3.5-flash',
-    'gemini-2.5-pro',
-    'gemini-1.5-flash-latest',
+    'gemini-3.6-flash',
   ];
 
   for (const prio of priorities) {
@@ -372,7 +372,20 @@ function createAiClient(config) {
     if (!config.geminiApiKey) throw new Error('GEMINI_API_KEY is not set.');
 
     const cleanKey = (config.geminiApiKey || '').trim();
-    let activeModel = config.geminiModel || 'gemini-3.6-flash';
+
+    // Pool of fallback candidate models that support free-tier generateContent
+    const candidateModels = [
+      config.geminiModel,
+      'gemini-3.5-flash',
+      'gemini-flash-lite-latest',
+      'gemini-3.1-flash-lite',
+      'gemini-3.7-flash',
+      'gemini-3.8-flash',
+      'gemini-3.5-flash-lite',
+      'gemini-3-flash-preview',
+    ].filter(Boolean).filter((m, i, arr) => arr.indexOf(m) === i);
+
+    let activeModel = candidateModels[0] || 'gemini-3.5-flash';
     let activeVersion = 'v1beta';
     let modelDiscoveryAttempted = false;
 
@@ -415,9 +428,28 @@ function createAiClient(config) {
               res.on('end', () => {
                 const text = Buffer.concat(chunks).toString();
                 if (res.statusCode === 429) {
-                  return reject(Object.assign(new Error(`Gemini HTTP 429: Rate limit reached`), {
+                  let isDailyQuota = false;
+                  let reason = text.slice(0, 200);
+                  try {
+                    const parsedErr = JSON.parse(text);
+                    const msg = parsedErr?.error?.message || '';
+                    reason = msg.slice(0, 200);
+                    if (
+                      msg.includes('FreeTier') ||
+                      msg.includes('per_day') ||
+                      msg.includes('PerDay') ||
+                      msg.includes('RESOURCE_EXHAUSTED') ||
+                      msg.includes('limit: 20') ||
+                      text.includes('GenerateRequestsPerDay')
+                    ) {
+                      isDailyQuota = true;
+                    }
+                  } catch {}
+                  return reject(Object.assign(new Error(`Gemini HTTP 429: ${reason}`), {
                     retryable: true,
                     isRateLimit: true,
+                    isDailyQuota,
+                    responseBody: text,
                   }));
                 }
                 if (res.statusCode >= 500) {
@@ -466,8 +498,27 @@ function createAiClient(config) {
             }
           }
 
+          // If daily quota is exhausted on this model, or persistent 429 / 404, auto-switch to next candidate!
+          const shouldRotateModel = err.isDailyQuota || (err.isRateLimit && attempt >= 1) || err.isNotFound;
+          if (shouldRotateModel) {
+            const nextCandidates = candidateModels.filter((m) => m !== activeModel);
+            if (nextCandidates.length > 0) {
+              const nextModel = nextCandidates[0];
+              // Move current exhausted model to end of the candidate list
+              const currIdx = candidateModels.indexOf(activeModel);
+              if (currIdx !== -1) {
+                candidateModels.splice(currIdx, 1);
+                candidateModels.push(activeModel);
+              }
+              logger.warn(`Model "${activeModel}" hit ${err.isDailyQuota ? 'daily quota exhaustion (429)' : err.isNotFound ? '404 not found' : 'persistent rate limit'}. Auto-switching to "${nextModel}"...`);
+              activeModel = nextModel;
+              attempt = -1; // restart attempt loop with next model
+              continue;
+            }
+          }
+
           if (attempt < retries && err.retryable) {
-            // For 429 rate limits, wait 15s / 30s to let the minute window reset
+            // For transient rate limits, wait 15s to let the minute window reset
             const delay = err.isRateLimit ? (attempt + 1) * 15000 : Math.pow(2, attempt) * 2000;
             logger.warn(`Gemini ${err.isRateLimit ? 'rate limit (429)' : 'transient error'} retry ${attempt + 1}/${retries} in ${Math.round(delay / 1000)}s`);
             await new Promise((r) => setTimeout(r, delay));
