@@ -1548,16 +1548,39 @@ export const ArticleEditor = defineComponent({
 
     onMounted(async () => {
       if (!isNew.value) {
-        const mine  = (await api.get('/api/articles?mine=true&pageSize=100')).items;
-        const found = mine.find(a => String(a.id) === String(route.params.id));
-        if (found) {
-          Object.assign(form, {
-            id: found.id, title: found.title, excerpt: found.excerpt || '',
-            content: found.content, categoryId: found.category?.id || '',
-            featuredImage: found.featuredImage || '', imageCaption: found.imageCaption || '',
-            tags: (found.tags || []).map(t => t.name).join(', '),
-            isBreaking: found.isBreaking, isFeatured: found.isFeatured, status: found.status,
-          });
+        const articleId = parseInt(route.params.id);
+        if (articleId && !isNaN(articleId)) {
+          form.id = articleId;
+        }
+
+        try {
+          // 1. Fetch the article directly by ID (handles articles by any author for staff)
+          const res = await api.get(`/api/articles/by-id/${route.params.id}`);
+          if (res?.article) {
+            const found = res.article;
+            Object.assign(form, {
+              id: found.id, title: found.title, excerpt: found.excerpt || '',
+              content: found.content, categoryId: found.category?.id || '',
+              featuredImage: found.featuredImage || '', imageCaption: found.imageCaption || '',
+              tags: (found.tags || []).map(t => t.name).join(', '),
+              isBreaking: found.isBreaking, isFeatured: found.isFeatured, status: found.status,
+            });
+          }
+        } catch {
+          // 2. Fallback: check my articles
+          try {
+            const mine = (await api.get('/api/articles?mine=true&pageSize=100')).items;
+            const found = mine?.find(a => String(a.id) === String(route.params.id));
+            if (found) {
+              Object.assign(form, {
+                id: found.id, title: found.title, excerpt: found.excerpt || '',
+                content: found.content, categoryId: found.category?.id || '',
+                featuredImage: found.featuredImage || '', imageCaption: found.imageCaption || '',
+                tags: (found.tags || []).map(t => t.name).join(', '),
+                isBreaking: found.isBreaking, isFeatured: found.isFeatured, status: found.status,
+              });
+            }
+          } catch {}
         }
         loadingArticle.value = false;
       }
@@ -1575,8 +1598,11 @@ export const ArticleEditor = defineComponent({
         };
         if (isNew.value) {
           const { article } = await api.post('/api/articles', payload);
+          form.id = article.id;
+          form.status = article.status;
           router.push(`/reporter/edit/${article.id}`);
         } else {
+          if (!form.id) throw new Error('Cannot update story without a valid ID.');
           await api.put(`/api/articles/${form.id}`, payload);
         }
       } catch (e) { error.value = e.message; }
@@ -1584,6 +1610,10 @@ export const ArticleEditor = defineComponent({
     };
 
     const doAction = async (action) => {
+      if (!form.id) {
+        error.value = 'Please save the story before performing workflow actions.';
+        return;
+      }
       loading.value = true;
       try {
         await api.post(`/api/articles/${form.id}/${action}`);
@@ -1698,19 +1728,19 @@ export const ArticleEditor = defineComponent({
                     <i :class="loading ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-floppy-disk'" aria-hidden="true"></i>
                     {{ loading ? 'Saving\u2026' : 'Save Draft' }}
                   </button>
-                  <button v-if="!isNew && (form.status==='DRAFT'||form.status==='REVISION_REQUIRED')" type="button" class="btn ghost" :disabled="loading" @click="doAction('submit')">
+                  <button v-if="!isNew && form.id && (form.status==='DRAFT'||form.status==='REVISION_REQUIRED')" type="button" class="btn ghost" :disabled="loading" @click="doAction('submit')">
                     <i class="fa-solid fa-paper-plane" aria-hidden="true"></i> Submit for Review
                   </button>
-                  <button v-if="!isNew && isStaff && form.status==='IN_REVIEW'" type="button" class="btn ghost" :disabled="loading" @click="doAction('approve')">
+                  <button v-if="!isNew && form.id && isStaff && form.status==='IN_REVIEW'" type="button" class="btn ghost" :disabled="loading" @click="doAction('approve')">
                     <i class="fa-solid fa-check" aria-hidden="true"></i> Approve
                   </button>
-                  <button v-if="!isNew && isStaff && (form.status==='APPROVED'||form.status==='IN_REVIEW')" type="button" class="btn accent" :disabled="loading" @click="doAction('publish')">
+                  <button v-if="!isNew && form.id && isStaff && (form.status==='APPROVED'||form.status==='IN_REVIEW')" type="button" class="btn accent" :disabled="loading" @click="doAction('publish')">
                     <i class="fa-solid fa-cloud-arrow-up" aria-hidden="true"></i> Publish
                   </button>
-                  <button v-if="!isNew && isStaff && form.status==='PUBLISHED'" type="button" class="btn ghost" :disabled="loading" @click="doAction('unpublish')">
+                  <button v-if="!isNew && form.id && isStaff && form.status==='PUBLISHED'" type="button" class="btn ghost" :disabled="loading" @click="doAction('unpublish')">
                     <i class="fa-solid fa-cloud-arrow-down" aria-hidden="true"></i> Unpublish
                   </button>
-                  <button v-if="!isNew && isStaff" type="button" class="btn danger" :disabled="loading" @click="doAction('archive')" style="margin-left:auto;">
+                  <button v-if="!isNew && form.id && isStaff" type="button" class="btn danger" :disabled="loading" @click="doAction('archive')" style="margin-left:auto;">
                     <i class="fa-solid fa-box-archive" aria-hidden="true"></i> Archive
                   </button>
                 </div>

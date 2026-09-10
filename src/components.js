@@ -391,34 +391,24 @@ export const ImageUploader = defineComponent({
       if (!file) return;
       error.value = '';
       uploading.value = true;
-      progress.value = 0;
+      progress.value = 10;
       try {
-        const sig = await api.post('/api/uploads/sign');
-        const fd = new FormData();
-        fd.append('file', file);
-        fd.append('api_key', sig.apiKey);
-        fd.append('timestamp', sig.timestamp);
-        fd.append('signature', sig.signature);
-        fd.append('folder', sig.folder);
-        const resourceType = file.type.startsWith('video/') ? 'video' : 'image';
-        const url = await new Promise((resolve, reject) => {
-          const xhr = new XMLHttpRequest();
-          // Use /image/upload or /video/upload to avoid 301 preflight CORS redirects
-          xhr.open('POST', `https://api.cloudinary.com/v1_1/${sig.cloudName}/${resourceType}/upload`);
-          xhr.upload.onprogress = (evt) => { if (evt.lengthComputable) progress.value = Math.round((evt.loaded / evt.total) * 100); };
-          xhr.onload = () => {
-            try {
-              const data = JSON.parse(xhr.responseText);
-              if (xhr.status >= 200 && xhr.status < 300) resolve(data.secure_url);
-              else reject(new Error(data.error?.message || 'Upload failed.'));
-            } catch { reject(new Error('Upload failed.')); }
-          };
-          xhr.onerror = () => reject(new Error('Upload failed. Check connection or CORS settings.'));
-          xhr.send(fd);
+        // Read file as base64 Data URL and upload via same-origin backend proxy
+        // This avoids third-party CORS preflight redirects from Cloudinary.
+        const dataUri = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = () => reject(new Error('Failed to read selected file.'));
+          reader.readAsDataURL(file);
         });
-        emit('update:modelValue', url);
+
+        progress.value = 40;
+        const res = await api.post('/api/uploads', { dataUri, filename: file.name });
+        progress.value = 100;
+        if (!res?.url) throw new Error(res?.error || 'Server did not return an image URL.');
+        emit('update:modelValue', res.url);
       } catch (err) {
-        error.value = err.message;
+        error.value = err.message || 'Upload failed.';
       } finally {
         uploading.value = false;
       }

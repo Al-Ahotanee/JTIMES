@@ -3,6 +3,7 @@
 // Render Web Service. Listens on process.env.PORT (never hardcoded).
 
 const path = require('path');
+const https = require('https');
 const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
@@ -37,7 +38,8 @@ if (!AUTH_SECRET) {
 // Security & core middleware
 // ---------------------------------------------------------------------
 app.set('trust proxy', 1);
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '25mb' }));
+app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 app.use(cookieParser());
 app.use(cors({ origin: true, credentials: true }));
 
@@ -220,6 +222,18 @@ app.get('/api/articles/:slug', async (req, res) => {
   res.json({ article: serializeArticle(article) });
 });
 
+app.get('/api/articles/by-id/:id', requireAuth, async (req, res) => {
+  const id = parseInt(req.params.id);
+  if (!id || isNaN(id)) return res.status(400).json({ error: 'Valid numeric article ID is required.' });
+  const article = await prisma.article.findUnique({
+    where: { id },
+    include: { author: true, category: true, tags: { include: { tag: true } } },
+  });
+  if (!article) return res.status(404).json({ error: 'Article not found.' });
+  if (!canEditArticle(req.user, article)) return res.status(403).json({ error: 'Forbidden' });
+  res.json({ article: serializeArticle(article) });
+});
+
 function serializeArticle(a) {
   return {
     id: a.id, title: a.title, slug: a.slug, excerpt: a.excerpt, content: a.content,
@@ -367,61 +381,80 @@ app.post('/api/articles', requireAuth, requireRole('ADMIN', 'EDITOR', 'REPORTER'
 
 app.put('/api/articles/:id', requireAuth, async (req, res) => {
   const id = parseInt(req.params.id);
-  const article = await prisma.article.findUnique({ where: { id } });
-  if (!article) return res.status(404).json({ error: 'Article not found.' });
-  if (!canEditArticle(req.user, article)) return res.status(403).json({ error: 'Forbidden' });
-  // Reporters may only edit their own drafts/revision-required stories.
-  if (req.user.role === 'REPORTER' && !['DRAFT', 'REVISION_REQUIRED'].includes(article.status)) {
-    return res.status(403).json({ error: 'This article is no longer editable at its current stage.' });
-  }
+  if (!id || isNaN(id)) return res.status(400).json({ error: 'Valid numeric article ID is required.' });
+  try {
+    const article = await prisma.article.findUnique({ where: { id } });
+    if (!article) return res.status(404).json({ error: 'Article not found.' });
+    if (!canEditArticle(req.user, article)) return res.status(403).json({ error: 'Forbidden' });
+    // Reporters may only edit their own drafts/revision-required stories.
+    if (req.user.role === 'REPORTER' && !['DRAFT', 'REVISION_REQUIRED'].includes(article.status)) {
+      return res.status(403).json({ error: 'This article is no longer editable at its current stage.' });
+    }
 
-  const { title, excerpt, content, categoryId, featuredImage, imageCaption, isBreaking, isFeatured } = req.body || {};
-  const data = {};
-  if (title) data.title = title;
-  if (excerpt !== undefined) data.excerpt = excerpt;
-  if (content !== undefined) data.content = sanitize(content);
-  if (categoryId) data.categoryId = parseInt(categoryId);
-  if (featuredImage !== undefined) data.featuredImage = featuredImage;
-  if (imageCaption !== undefined) data.imageCaption = imageCaption;
-  if (isStaff(req.user)) {
-    if (isBreaking !== undefined) data.isBreaking = !!isBreaking;
-    if (isFeatured !== undefined) data.isFeatured = !!isFeatured;
-  }
+    const { title, excerpt, content, categoryId, featuredImage, imageCaption, isBreaking, isFeatured } = req.body || {};
+    const data = {};
+    if (title) data.title = title;
+    if (excerpt !== undefined) data.excerpt = excerpt;
+    if (content !== undefined) data.content = sanitize(content);
+    if (categoryId) data.categoryId = parseInt(categoryId);
+    if (featuredImage !== undefined) data.featuredImage = featuredImage;
+    if (imageCaption !== undefined) data.imageCaption = imageCaption;
+    if (isStaff(req.user)) {
+      if (isBreaking !== undefined) data.isBreaking = !!isBreaking;
+      if (isFeatured !== undefined) data.isFeatured = !!isFeatured;
+    }
 
-  const updated = await prisma.article.update({
-    where: { id }, data,
-    include: { author: true, category: true, tags: { include: { tag: true } } },
-  });
-  res.json({ article: serializeArticle(updated) });
+    const updated = await prisma.article.update({
+      where: { id }, data,
+      include: { author: true, category: true, tags: { include: { tag: true } } },
+    });
+    res.json({ article: serializeArticle(updated) });
+  } catch (err) {
+    console.error(`[ARTICLE UPDATE] Error updating article ${id}:`, err.message);
+    res.status(500).json({ error: err.message || 'Failed to update article' });
+  }
 });
 
 app.delete('/api/articles/:id', requireAuth, requireRole('ADMIN'), async (req, res) => {
-  await prisma.article.delete({ where: { id: parseInt(req.params.id) } });
-  res.json({ ok: true });
+  const id = parseInt(req.params.id);
+  if (!id || isNaN(id)) return res.status(400).json({ error: 'Valid numeric article ID is required.' });
+  try {
+    await prisma.article.delete({ where: { id } });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Failed to delete article' });
+  }
 });
 
 async function transition(req, res, { from, to, allowedRoles, action }) {
   const id = parseInt(req.params.id);
-  const article = await prisma.article.findUnique({ where: { id } });
-  if (!article) return res.status(404).json({ error: 'Article not found.' });
+  if (!id || isNaN(id)) return res.status(400).json({ error: 'Valid numeric article ID is required.' });
 
-  const isOwner = req.user.role === 'REPORTER' && article.authorId === req.user.id;
-  const roleOk = allowedRoles.includes(req.user.role) && (allowedRoles.includes('REPORTER') ? isOwner || isStaff(req.user) : true);
-  if (!roleOk) return res.status(403).json({ error: 'Forbidden' });
-  if (req.user.role === 'ADMIN') {
-    // Admin can override the workflow from any state.
-  } else if (from.length && !from.includes(article.status)) {
-    return res.status(409).json({ error: `Article must be in one of [${from.join(', ')}] for this action (currently ${article.status}).` });
+  try {
+    const article = await prisma.article.findUnique({ where: { id } });
+    if (!article) return res.status(404).json({ error: 'Article not found.' });
+
+    const isOwner = req.user.role === 'REPORTER' && article.authorId === req.user.id;
+    const roleOk = allowedRoles.includes(req.user.role) && (allowedRoles.includes('REPORTER') ? isOwner || isStaff(req.user) : true);
+    if (!roleOk) return res.status(403).json({ error: 'Forbidden' });
+    if (req.user.role === 'ADMIN') {
+      // Admin can override the workflow from any state.
+    } else if (from.length && !from.includes(article.status)) {
+      return res.status(409).json({ error: `Article must be in one of [${from.join(', ')}] for this action (currently ${article.status}).` });
+    }
+
+    const data = { status: to };
+    if (to === 'PUBLISHED') data.publishedAt = new Date();
+
+    const updated = await prisma.$transaction([
+      prisma.article.update({ where: { id }, data, include: { author: true, category: true, tags: { include: { tag: true } } } }),
+      prisma.editorialAction.create({ data: { articleId: id, userId: req.user.id, action, note: req.body?.note || null } }),
+    ]);
+    res.json({ article: serializeArticle(updated[0]) });
+  } catch (err) {
+    console.error(`[ARTICLE WORKFLOW] Error transition ${action} on article ${id}:`, err.message);
+    res.status(500).json({ error: err.message || 'Workflow transition failed' });
   }
-
-  const data = { status: to };
-  if (to === 'PUBLISHED') data.publishedAt = new Date();
-
-  const updated = await prisma.$transaction([
-    prisma.article.update({ where: { id }, data, include: { author: true, category: true, tags: { include: { tag: true } } } }),
-    prisma.editorialAction.create({ data: { articleId: id, userId: req.user.id, action, note: req.body?.note || null } }),
-  ]);
-  res.json({ article: serializeArticle(updated[0]) });
 }
 
 app.post('/api/articles/:id/submit', requireAuth, requireRole('ADMIN', 'EDITOR', 'REPORTER'), (req, res) =>
@@ -591,6 +624,77 @@ app.post('/api/newsletter', async (req, res) => {
 // The database only ever stores the resulting Cloudinary URL (see
 // Article.featuredImage / imageCaption in the schema).
 // ---------------------------------------------------------------------
+app.post('/api/uploads', requireAuth, requireRole('ADMIN', 'EDITOR', 'REPORTER'), async (req, res) => {
+  const { dataUri, file } = req.body || {};
+  const uploadData = dataUri || file;
+  if (!uploadData) {
+    return res.status(400).json({ error: 'No media file provided.' });
+  }
+
+  const cloudName = (process.env.CLOUDINARY_CLOUD_NAME || '').trim();
+  const apiKey = (process.env.CLOUDINARY_API_KEY || '').trim();
+  const apiSecret = (process.env.CLOUDINARY_API_SECRET || '').trim();
+
+  if (!cloudName || !apiKey || !apiSecret) {
+    return res.status(500).json({ error: 'Media storage is not configured on the server. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET.' });
+  }
+
+  const timestamp = Math.round(Date.now() / 1000);
+  const folder = `jigawa-times/${req.user.role.toLowerCase()}`;
+  const toSign = `folder=${folder}&timestamp=${timestamp}${apiSecret}`;
+  const signature = crypto.createHash('sha1').update(toSign).digest('hex');
+
+  const payload = JSON.stringify({
+    file: uploadData,
+    api_key: apiKey,
+    timestamp,
+    signature,
+    folder,
+  });
+
+  const isVideo = typeof uploadData === 'string' && uploadData.startsWith('data:video/');
+  const resourceType = isVideo ? 'video' : 'image';
+
+  try {
+    const cloudRes = await new Promise((resolve, reject) => {
+      const cReq = https.request({
+        hostname: 'api.cloudinary.com',
+        path: `/v1_1/${cloudName}/${resourceType}/upload`,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+        },
+        timeout: 60000,
+      }, (cRes) => {
+        let chunks = '';
+        cRes.on('data', (c) => chunks += c);
+        cRes.on('end', () => {
+          try {
+            const parsed = JSON.parse(chunks);
+            if (cRes.statusCode >= 200 && cRes.statusCode < 300) {
+              resolve(parsed);
+            } else {
+              reject(new Error(parsed.error?.message || `Cloudinary returned HTTP ${cRes.statusCode}`));
+            }
+          } catch {
+            reject(new Error(`Cloudinary returned invalid response (HTTP ${cRes.statusCode})`));
+          }
+        });
+      });
+      cReq.on('error', reject);
+      cReq.on('timeout', () => { cReq.destroy(); reject(new Error('Upload to Cloudinary timed out.')); });
+      cReq.write(payload);
+      cReq.end();
+    });
+
+    res.json({ url: cloudRes.secure_url || cloudRes.url, publicId: cloudRes.public_id });
+  } catch (err) {
+    console.error('[UPLOADS] Cloudinary upload error:', err.message);
+    res.status(502).json({ error: `Upload failed: ${err.message}` });
+  }
+});
+
 app.post('/api/uploads/sign', requireAuth, requireRole('ADMIN', 'EDITOR', 'REPORTER'), (req, res) => {
   const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
   const apiKey = process.env.CLOUDINARY_API_KEY;
