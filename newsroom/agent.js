@@ -132,13 +132,61 @@ function postJson(url, body, token, options = {}) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Tokenize and clean a story title for semantic overlap & deduplication.
+ * Strips common editorial tags, source branding, and stop words.
+ */
+function extractTitleTokens(title) {
+  if (!title || typeof title !== 'string') return new Set();
+  const STOP_WORDS = new Set([
+    'the', 'a', 'an', 'and', 'or', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
+    'from', 'as', 'is', 'was', 'are', 'were', 'be', 'been', 'being', 'have', 'has', 'had',
+    'do', 'does', 'did', 'will', 'would', 'shall', 'should', 'can', 'could', 'may', 'might',
+    'must', 'about', 'above', 'after', 'again', 'against', 'all', 'any', 'both', 'each',
+    'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same',
+    'so', 'than', 'too', 'very', 'just', 'news', 'breaking', 'exclusive', 'report', 'reports',
+    'update', 'updates', 'photos', 'video', 'watch', 'read', 'daily', 'times',
+  ]);
+
+  return new Set(
+    title
+      .toLowerCase()
+      .replace(/\[.*?\]|\(.*?\)/g, ' ')
+      .replace(/^(?:breaking|just in|exclusive|report|opinion|update|photos|video|editorial):\s*/i, '')
+      .replace(/(?:-\s*daily trust|\|\s*vanguard|\|\s*punch|\|\s*channels|\|\s*premium times|\|\s*the cable|\|\s*the guardian|\|\s*bbc|\|\s*tribune).*$/i, '')
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length >= 3 && !STOP_WORDS.has(w))
+  );
+}
+
+/**
+ * Calculate Jaccard and containment similarity between two token sets.
+ * Returns a value between 0.0 (no match) and 1.0 (identical/contained).
+ */
+function calculateTitleSimilarity(tokensA, tokensB) {
+  if (!tokensA || !tokensB || !tokensA.size || !tokensB.size) return 0;
+  let intersection = 0;
+  for (const token of tokensA) {
+    if (tokensB.has(token)) intersection++;
+  }
+  const containment = intersection / Math.min(tokensA.size, tokensB.size);
+  const jaccard = intersection / (tokensA.size + tokensB.size - intersection);
+  return Math.max(containment, jaccard * 1.15);
+}
+
+/**
  * Parse an RSS/Atom XML string into an array of normalised items.
+ * Enforces freshness: discards items older than maxAgeHours (default 48h Jigawa, 24h other).
  * @param {string} xml
  * @param {object} source  Source definition from sources.js
+ * @param {object} options Optional flags: maxAgeHours, ignoreDateFilter
  * @returns {object[]}
  */
-function parseRss(xml, source) {
+function parseRss(xml, source = {}, options = {}) {
   const items = [];
+  const maxAgeHours = options.maxAgeHours !== undefined
+    ? options.maxAgeHours
+    : (source.region === 'jigawa' ? 48 : 24);
 
   // Extract <item> or <entry> blocks
   const itemRe = /<(?:item|entry)>([\s\S]*?)<\/(?:item|entry)>/gi;
@@ -171,6 +219,20 @@ function parseRss(xml, source) {
 
     if (!title || !link) continue;
 
+    // Freshness filter: discard old/stale news
+    let publishedIso = null;
+    if (pubDate) {
+      const d = new Date(pubDate);
+      if (!isNaN(d.getTime())) {
+        publishedIso = d.toISOString();
+        const ageHours = (Date.now() - d.getTime()) / (1000 * 60 * 60);
+        if (!options.ignoreDateFilter && ageHours > maxAgeHours) {
+          // Stale item — skip it
+          continue;
+        }
+      }
+    }
+
     // Strip HTML from description for clean text
     const contentText = description.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 
@@ -185,7 +247,7 @@ function parseRss(xml, source) {
       content:     contentText,
       imageUrl:    imageUrl || null,
       author:      author || null,
-      publishedAt: pubDate ? new Date(pubDate).toISOString() : null,
+      publishedAt: publishedIso || new Date().toISOString(),
       contentHash: crypto.createHash('sha256').update(title + link).digest('hex'),
       discoveredAt: new Date().toISOString(),
     });
@@ -198,13 +260,14 @@ function parseRss(xml, source) {
 // ---------------------------------------------------------------------------
 
 /**
- * Fetch all configured RSS sources and return normalised story items.
- * A failure in one source does not stop the rest.
+ * Fetch all configured RSS sources, apply freshness filtering,
+ * and perform cross-source deduplication across the batch.
  * @param {object[]} sources
+ * @param {object} options
  * @returns {Promise<{items: object[], stats: object}>}
  */
-async function discoverStories(sources) {
-  const stats = { sourcesAttempted: 0, sourcesFailed: 0, itemsDiscovered: 0 };
+async function discoverStories(sources, options = {}) {
+  const stats = { sourcesAttempted: 0, sourcesFailed: 0, itemsDiscovered: 0, duplicatesSkipped: 0 };
   const allItems = [];
   logger.info(`Scanning ${sources.length} news sources...`);
 
@@ -217,10 +280,10 @@ async function discoverStories(sources) {
         stats.sourcesAttempted++;
         try {
           const xml = await fetchUrl(source.url, { timeout: 10000 });
-          const items = parseRss(xml, source);
+          const items = parseRss(xml, source, options);
           allItems.push(...items);
           stats.itemsDiscovered += items.length;
-          logger.info(`Source [${source.name}]: ${items.length} stories discovered`);
+          logger.info(`Source [${source.name}]: ${items.length} stories discovered (fresh within window)`);
         } catch (err) {
           stats.sourcesFailed++;
           logger.warn(`Source [${source.name}] fetch failed: ${err.message}`);
@@ -229,9 +292,36 @@ async function discoverStories(sources) {
     );
   }
 
-  logger.info(`Discovery complete: ${allItems.length} total stories discovered (${stats.sourcesFailed} sources unreachable)`);
-  return { items: allItems, stats };
+  // Intra-batch deduplication: cluster competing sources reporting on the same event
+  const seenStories = [];
+  const uniqueItems = [];
+
+  for (const item of allItems) {
+    const tokens = extractTitleTokens(item.title);
+    let isDup = false;
+    for (const seen of seenStories) {
+      const sim = calculateTitleSimilarity(tokens, seen.tokens);
+      if (sim >= 0.70) {
+        isDup = true;
+        stats.duplicatesSkipped++;
+        // If the candidate has an image and seen story does not, adopt candidate's image
+        if (!seen.item.imageUrl && item.imageUrl) {
+          seen.item.imageUrl = item.imageUrl;
+        }
+        break;
+      }
+    }
+
+    if (!isDup) {
+      seenStories.push({ title: item.title, tokens, item });
+      uniqueItems.push(item);
+    }
+  }
+
+  logger.info(`Discovery complete: ${allItems.length} discovered, ${uniqueItems.length} unique retained (${stats.duplicatesSkipped} batch duplicates skipped)`);
+  return { items: uniqueItems, stats };
 }
+
 
 // ---------------------------------------------------------------------------
 // STAGE 2: Deduplication
@@ -1239,16 +1329,29 @@ async function generateDraftFromAggregated(item, user = null, prismaClient = nul
 
   // 2. Resolve image: source og:image -> Pollinations.ai 16:9 illustration -> curated fallback
   const categorySlug = (aiData.category || item.category || 'jigawa').toLowerCase();
-  const region = (item.region || 'nigeria').toLowerCase();
+  const region = (item.rawData?.region || item.region || (categorySlug === 'jigawa' || categorySlug === 'buji' ? 'jigawa' : 'nigeria')).toLowerCase();
   const rawImage = item.imageUrl || item.rawData?.originalImageUrl || item.rawData?.imageUrl;
 
-  const image = await selectImage(
-    rawImage,
-    item.sourceUrl,
-    aiData.title,
-    categorySlug,
+  const itemForImage = {
+    title: aiData.title || item.sourceTitle || item.title,
+    sourceUrl: item.sourceUrl,
+    sourceName: item.sourceName,
+    imageUrl: rawImage,
+    category: categorySlug,
     region,
-    aiData.imagePrompt || aiData.title
+    rawData: item.rawData,
+  };
+
+  const brief = {
+    title: aiData.title,
+    caption: aiData.imageCaption || `${aiData.title} — Jigawa Times reporting`,
+    prompt: aiData.imagePrompt || aiData.title,
+  };
+
+  const image = await selectImage(
+    itemForImage,
+    brief,
+    { imageProvider: 'pollinations' }
   );
 
   const prisma = prismaClient;
@@ -1360,6 +1463,8 @@ async function generateDraftFromAggregated(item, user = null, prismaClient = nul
 module.exports = {
   discoverStories,
   deduplicateItems,
+  extractTitleTokens,
+  calculateTitleSimilarity,
   classifyItem,
   verifyItem,
   writeArticle,
@@ -1371,3 +1476,4 @@ module.exports = {
   parseRss,
   fetchUrl,
 };
+

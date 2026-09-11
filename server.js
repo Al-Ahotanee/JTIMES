@@ -1062,12 +1062,21 @@ app.post('/api/newsroom/run', requireAuth, requireRole('ADMIN'), async (req, res
 // HYBRID NEWS AGGREGATOR ENDPOINTS
 // =====================================================================
 
+// Regional source definitions for indexed database queries
+const AGGREGATOR_REGION_SOURCES = {
+  jigawa: ['Google News – Jigawa', 'Google News – Dutse & Buji', 'Daily Trust – Northern News', 'Jigawa State Government'],
+  nigeria: ['Channels Television', 'Vanguard News', 'Punch Newspapers', 'Premium Times', 'Tribune Online'],
+  africa: ['BBC News – Africa', 'AllAfrica News', 'AfricaNews'],
+  world: ['BBC News – World', 'Al Jazeera English', 'The Guardian – World News'],
+};
+
 // GET /api/aggregator/items — list aggregated stories with region, source, status, search filters
 app.get('/api/aggregator/items', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
   const { region, status, source, q, pageSize: ps, page: pg } = req.query;
   const pageSize = Math.min(Math.max(parseInt(ps) || 24, 1), 100);
   const page     = Math.max(parseInt(pg) || 1, 1);
   const where    = {};
+  const andClauses = [];
 
   if (status && status !== 'ALL') {
     where.status = status;
@@ -1077,14 +1086,35 @@ app.get('/api/aggregator/items', requireAuth, requireRole('ADMIN', 'EDITOR'), as
   }
   if (q && typeof q === 'string' && q.trim()) {
     const term = q.trim();
-    where.OR = [
-      { sourceTitle: { contains: term, mode: 'insensitive' } },
-      { sourceName: { contains: term, mode: 'insensitive' } },
-    ];
+    andClauses.push({
+      OR: [
+        { sourceTitle: { contains: term, mode: 'insensitive' } },
+        { sourceName: { contains: term, mode: 'insensitive' } },
+      ],
+    });
   }
 
-  // Fetch items
-  let [items, total] = await Promise.all([
+  if (region && region !== 'all') {
+    const reg = region.toLowerCase();
+    const sourcesForRegion = AGGREGATOR_REGION_SOURCES[reg] || [];
+    const regionOr = [];
+    if (sourcesForRegion.length) {
+      regionOr.push({ sourceName: { in: sourcesForRegion } });
+    }
+    if (reg === 'jigawa') {
+      regionOr.push({ category: { in: ['jigawa', 'buji'] } });
+    } else {
+      regionOr.push({ category: reg });
+    }
+    andClauses.push({ OR: regionOr });
+  }
+
+  if (andClauses.length) {
+    where.AND = andClauses;
+  }
+
+  // Fetch items with DB pagination & filtering
+  const [items, total] = await Promise.all([
     prisma.newsroomItem.findMany({
       where,
       orderBy: { createdAt: 'desc' },
@@ -1108,14 +1138,6 @@ app.get('/api/aggregator/items', requireAuth, requireRole('ADMIN', 'EDITOR'), as
     prisma.newsroomItem.count({ where }),
   ]);
 
-  // Client-safe region filtering if region specified
-  if (region && region !== 'all') {
-    items = items.filter(item => {
-      const itemRegion = item.rawData?.region || (item.category === 'jigawa' || item.category === 'buji' ? 'jigawa' : 'nigeria');
-      return itemRegion.toLowerCase() === region.toLowerCase();
-    });
-  }
-
   res.json({
     items,
     page,
@@ -1134,65 +1156,115 @@ app.get('/api/aggregator/stats', requireAuth, requireRole('ADMIN', 'EDITOR'), as
     prisma.newsroomItem.count({ where: { status: 'PUBLISHED' } }),
   ]);
 
-  // Regional breakdown by inspecting recent items
-  const recentItems = await prisma.newsroomItem.findMany({
-    select: { rawData: true, category: true },
-    take: 1000,
-  });
-  let jigawa = 0, nigeria = 0, africa = 0, world = 0;
-  for (const it of recentItems) {
-    const r = it.rawData?.region || (it.category === 'jigawa' || it.category === 'buji' ? 'jigawa' : 'nigeria');
-    if (r === 'jigawa') jigawa++;
-    else if (r === 'africa') africa++;
-    else if (r === 'world') world++;
-    else nigeria++;
-  }
+  const [jigawa, nigeria, africa, world] = await Promise.all([
+    prisma.newsroomItem.count({
+      where: {
+        OR: [
+          { sourceName: { in: AGGREGATOR_REGION_SOURCES.jigawa } },
+          { category: { in: ['jigawa', 'buji'] } },
+        ],
+      },
+    }),
+    prisma.newsroomItem.count({
+      where: {
+        OR: [
+          { sourceName: { in: AGGREGATOR_REGION_SOURCES.nigeria } },
+          { category: 'nigeria' },
+        ],
+      },
+    }),
+    prisma.newsroomItem.count({
+      where: {
+        OR: [
+          { sourceName: { in: AGGREGATOR_REGION_SOURCES.africa } },
+          { category: 'africa' },
+        ],
+      },
+    }),
+    prisma.newsroomItem.count({
+      where: {
+        OR: [
+          { sourceName: { in: AGGREGATOR_REGION_SOURCES.world } },
+          { category: 'world' },
+        ],
+      },
+    }),
+  ]);
 
   res.json({ total, discovered, drafted, published, jigawa, nigeria, africa, world });
 });
 
-// POST /api/aggregator/scan — trigger on-demand RSS discovery scan
+// POST /api/aggregator/scan — trigger on-demand RSS discovery scan with deduplication & time window
 app.post('/api/aggregator/scan', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
   const logger = require('./newsroom/logger.js');
-  const { discoverStories } = require('./newsroom/agent.js');
+  const { discoverStories, extractTitleTokens, calculateTitleSimilarity } = require('./newsroom/agent.js');
   const SOURCES = require('./newsroom/sources.js');
 
   try {
     logger.info(`[AGGREGATOR] Manual scan requested by ${req.user.email}`);
     const { items: rawItems, stats } = await discoverStories(SOURCES);
     let newSaved = 0;
+    let dbDuplicatesSkipped = 0;
+
+    // Load recent story titles from the past 48 hours for fast cross-scan deduplication
+    const recentDbItems = await prisma.newsroomItem.findMany({
+      where: {
+        createdAt: { gte: new Date(Date.now() - 48 * 60 * 60 * 1000) },
+      },
+      select: { id: true, sourceTitle: true, sourceUrl: true },
+      take: 500,
+    });
+
+    const recentTokenSets = recentDbItems.map((it) => ({
+      id: it.id,
+      title: it.sourceTitle || '',
+      url: it.sourceUrl,
+      tokens: extractTitleTokens(it.sourceTitle || ''),
+    }));
 
     for (const item of rawItems) {
       try {
+        // 1. Exact URL check
         const existing = await prisma.newsroomItem.findUnique({ where: { sourceUrl: item.sourceUrl } });
-        if (!existing) {
-          await prisma.newsroomItem.create({
-            data: {
-              sourceUrl: item.sourceUrl,
-              sourceName: item.sourceName,
-              sourceTitle: item.title,
-              contentHash: item.contentHash,
-              status: 'DISCOVERED',
-              category: item.category || 'jigawa',
-              rawData: {
-                snippet: item.content,
-                originalImageUrl: item.imageUrl,
-                region: item.region || 'nigeria',
-                publishedAt: item.publishedAt,
-                author: item.author,
-              },
-            },
-          });
-          newSaved++;
+        if (existing) continue;
+
+        // 2. Title similarity check against recent DB items
+        const itemTokens = extractTitleTokens(item.title);
+        const isDbDup = recentTokenSets.some((r) => calculateTitleSimilarity(itemTokens, r.tokens) >= 0.70);
+        if (isDbDup) {
+          dbDuplicatesSkipped++;
+          continue;
         }
+
+        // 3. Save new unique, fresh story
+        await prisma.newsroomItem.create({
+          data: {
+            sourceUrl: item.sourceUrl,
+            sourceName: item.sourceName,
+            sourceTitle: item.title,
+            contentHash: item.contentHash,
+            status: 'DISCOVERED',
+            category: item.category || item.region || 'jigawa',
+            rawData: {
+              snippet: item.content,
+              originalImageUrl: item.imageUrl,
+              region: item.region || 'nigeria',
+              publishedAt: item.publishedAt,
+              author: item.author,
+            },
+          },
+        });
+        newSaved++;
+        recentTokenSets.push({ id: 0, title: item.title, url: item.sourceUrl, tokens: itemTokens });
       } catch {}
     }
 
-    logger.info(`[AGGREGATOR] Scan complete: ${rawItems.length} discovered, ${newSaved} newly saved`);
+    logger.info(`[AGGREGATOR] Scan complete: ${rawItems.length} unique in batch, ${newSaved} newly saved (${dbDuplicatesSkipped} DB duplicates skipped)`);
     res.json({
       success: true,
       totalDiscovered: rawItems.length,
       newSaved,
+      dbDuplicatesSkipped,
       stats,
     });
   } catch (err) {
@@ -1200,6 +1272,55 @@ app.post('/api/aggregator/scan', requireAuth, requireRole('ADMIN', 'EDITOR'), as
     res.status(500).json({ error: `Aggregator scan failed: ${err.message}` });
   }
 });
+
+// POST /api/aggregator/deduplicate — Clean up existing duplicate DISCOVERED stories from database
+app.post('/api/aggregator/deduplicate', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
+  const logger = require('./newsroom/logger.js');
+  const { extractTitleTokens, calculateTitleSimilarity } = require('./newsroom/agent.js');
+
+  try {
+    const items = await prisma.newsroomItem.findMany({
+      where: { status: 'DISCOVERED' },
+      orderBy: { createdAt: 'desc' },
+      take: 1000,
+    });
+
+    const seen = [];
+    const duplicateIds = [];
+
+    for (const item of items) {
+      const tokens = extractTitleTokens(item.sourceTitle || '');
+      let isDup = false;
+      for (const s of seen) {
+        if (calculateTitleSimilarity(tokens, s.tokens) >= 0.70) {
+          isDup = true;
+          duplicateIds.push(item.id);
+          break;
+        }
+      }
+      if (!isDup) {
+        seen.push({ id: item.id, title: item.sourceTitle, tokens });
+      }
+    }
+
+    if (duplicateIds.length > 0) {
+      await prisma.newsroomItem.updateMany({
+        where: { id: { in: duplicateIds } },
+        data: { status: 'REJECTED' },
+      });
+    }
+
+    logger.info(`[AGGREGATOR DEDUP] Cleaned up ${duplicateIds.length} duplicate items.`);
+    res.json({
+      success: true,
+      cleanedCount: duplicateIds.length,
+      remainingCount: seen.length,
+    });
+  } catch (err) {
+    res.status(500).json({ error: `Deduplication failed: ${err.message}` });
+  }
+});
+
 
 // POST /api/aggregator/generate/:id — AI synthesize & draft a single story
 app.post('/api/aggregator/generate/:id', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {

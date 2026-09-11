@@ -2266,8 +2266,31 @@ export const AdminAggregator = defineComponent({
       fetchItems();
     };
 
+    const cleaning = ref(false);
+    const cleanDuplicates = async () => {
+      cleaning.value = true;
+      try {
+        const res = await api.post('/api/aggregator/deduplicate');
+        notify.success('Deduplication Complete', `Cleaned ${res.cleanedCount} duplicate stories. ${res.remainingCount} unique stories active.`);
+        await Promise.all([fetchStats(), fetchItems()]);
+      } catch (err) {
+        notify.error('Deduplication Failed', err.message);
+      } finally {
+        cleaning.value = false;
+      }
+    };
+
     const getItemRegion = (it) => {
-      return (it.rawData?.region || (it.category === 'jigawa' || it.category === 'buji' ? 'jigawa' : 'nigeria')).toLowerCase();
+      if (it.rawData?.region) return it.rawData.region.toLowerCase();
+      const cat = (it.category || '').toLowerCase();
+      if (cat === 'jigawa' || cat === 'buji') return 'jigawa';
+      if (cat === 'africa') return 'africa';
+      if (cat === 'world') return 'world';
+      const name = it.sourceName || '';
+      if (name.includes('Jigawa') || name.includes('Dutse') || name.includes('Daily Trust')) return 'jigawa';
+      if (name.includes('Africa')) return 'africa';
+      if (name.includes('World') || name.includes('Al Jazeera')) return 'world';
+      return 'nigeria';
     };
 
     const getRegionBadgeClass = (reg) => {
@@ -2316,6 +2339,7 @@ export const AdminAggregator = defineComponent({
       totalPages,
       loading,
       scanning,
+      cleaning,
       generatingId,
       selectedIds,
       viewMode,
@@ -2323,6 +2347,7 @@ export const AdminAggregator = defineComponent({
       previewModal,
       sourcesList,
       scanFeeds,
+      cleanDuplicates,
       togglePause,
       draftStory,
       batchDraft,
@@ -2502,10 +2527,16 @@ export const AdminAggregator = defineComponent({
               </button>
             </div>
 
+            <button class="btn ghost btn-sm" :disabled="cleaning" @click="cleanDuplicates" title="Clean duplicate stories across feeds">
+              <i :class="cleaning ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-broom'" style="color:var(--accent);"></i>
+              <span>{{ cleaning ? 'Cleaning…' : 'Clean Duplicates' }}</span>
+            </button>
+
             <button class="btn ghost btn-sm" @click="fetchItems" title="Refresh list">
               <i class="fa-solid fa-rotate-right"></i>
             </button>
           </div>
+
         </div>
 
         <!-- Batch Operations Bar (when items selected) -->
@@ -2581,12 +2612,13 @@ export const AdminAggregator = defineComponent({
             <!-- Thumbnail Image -->
             <div class="story-card-image-wrap">
               <img
-                v-if="item.article?.featuredImage || item.rawData?.originalImageUrl"
-                :src="item.article?.featuredImage || item.rawData?.originalImageUrl"
+                v-if="item.article?.featuredImage || item.rawData?.originalImageUrl || item.rawData?.imageUrl || item.imageUrl"
+                :src="item.article?.featuredImage || item.rawData?.originalImageUrl || item.rawData?.imageUrl || item.imageUrl"
                 :alt="item.sourceTitle || item.title"
                 loading="lazy"
                 class="story-card-img"
               />
+
               <div v-else class="story-card-img-placeholder">
                 <i class="fa-solid fa-newspaper" aria-hidden="true"></i>
               </div>
@@ -2714,12 +2746,13 @@ export const AdminAggregator = defineComponent({
                 <td>
                   <div class="table-thumb">
                     <img
-                      v-if="item.article?.featuredImage || item.rawData?.originalImageUrl"
-                      :src="item.article?.featuredImage || item.rawData?.originalImageUrl"
+                      v-if="item.article?.featuredImage || item.rawData?.originalImageUrl || item.rawData?.imageUrl || item.imageUrl"
+                      :src="item.article?.featuredImage || item.rawData?.originalImageUrl || item.rawData?.imageUrl || item.imageUrl"
                       class="table-thumb-img"
                     />
                     <i v-else class="fa-solid fa-newspaper text-muted"></i>
                   </div>
+
                 </td>
                 <td>
                   <div class="table-title">{{ item.sourceTitle || item.title }}</div>

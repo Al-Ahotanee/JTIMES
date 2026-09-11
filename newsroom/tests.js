@@ -10,8 +10,8 @@ const assert = require('assert');
 // ---------------------------------------------------------------------------
 // Import modules under test
 // ---------------------------------------------------------------------------
-const { parseRss, parseAiJson, deduplicateItems } = require('./agent.js');
-const { isRestrictedDomain, validateImageUrl }    = require('./images.js');
+const { parseRss, parseAiJson, deduplicateItems, extractTitleTokens, calculateTitleSimilarity } = require('./agent.js');
+const { isRestrictedDomain, validateImageUrl, getCuratedCategoryFallback, selectImage }    = require('./images.js');
 
 let passed = 0;
 let failed  = 0;
@@ -320,6 +320,77 @@ test('manual mode is the default', () => {
 });
 
 // ---------------------------------------------------------------------------
+// HYBRID AGGREGATOR: DEDUPLICATION & TIME-WINDOW TESTS
+// ---------------------------------------------------------------------------
+console.log('\n[TEST] Aggregator Deduplication & Freshness');
+
+test('extractTitleTokens cleans prefixes and boilerplate', () => {
+  const tokens = extractTitleTokens('Breaking: Jigawa State Approves New 2026 Farming Scheme - Daily Trust');
+  assert.ok(tokens.has('jigawa'), 'Should retain jigawa');
+  assert.ok(tokens.has('approves'), 'Should retain approves');
+  assert.ok(tokens.has('farming'), 'Should retain farming');
+  assert.ok(tokens.has('scheme'), 'Should retain scheme');
+  assert.ok(!tokens.has('breaking'), 'Should strip breaking prefix');
+  assert.ok(!tokens.has('daily'), 'Should strip daily trust branding');
+});
+
+test('calculateTitleSimilarity detects cross-outlet duplicate reporting', () => {
+  const titleA = 'President Tinubu Signs Historic 2026 National Budget Into Law';
+  const titleB = 'Tinubu signs 2026 national budget into law in Abuja';
+  const tokensA = extractTitleTokens(titleA);
+  const tokensB = extractTitleTokens(titleB);
+  const sim = calculateTitleSimilarity(tokensA, tokensB);
+  assert.ok(sim >= 0.70, `Expected similarity >= 0.70, got ${sim}`);
+});
+
+test('calculateTitleSimilarity distinguishes distinct unrelated stories', () => {
+  const titleA = 'Jigawa State Governor Inspects Dutse Modern Hospital Project';
+  const titleB = 'Central Bank of Nigeria Lowers Monetary Policy Rate to 24%';
+  const tokensA = extractTitleTokens(titleA);
+  const tokensB = extractTitleTokens(titleB);
+  const sim = calculateTitleSimilarity(tokensA, tokensB);
+  assert.ok(sim < 0.30, `Expected low similarity for distinct stories, got ${sim}`);
+});
+
+test('parseRss discards old stories beyond freshness window', () => {
+  const threeDaysAgo = new Date(Date.now() - 72 * 60 * 60 * 1000).toUTCString();
+  const xml = `
+    <rss><channel>
+      <item>
+        <title>Stale News From 3 Days Ago</title>
+        <link>https://example.com/stale</link>
+        <pubDate>${threeDaysAgo}</pubDate>
+      </item>
+    </channel></rss>`;
+  const source = { name: 'Test Feed', region: 'nigeria', category: 'politics' };
+  const items = parseRss(xml, source, { maxAgeHours: 24 });
+  assert.strictEqual(items.length, 0, 'Should discard item older than 24 hours');
+});
+
+test('getCuratedCategoryFallback assigns distinct photos to different stories', () => {
+  const photo1 = getCuratedCategoryFallback('jigawa', 'First Unique Story About Agricultural Subsidies');
+  const photo2 = getCuratedCategoryFallback('jigawa', 'Completely Different Story On Primary Education');
+  assert.ok(photo1.url, 'Should have photo1 URL');
+  assert.ok(photo2.url, 'Should have photo2 URL');
+  // Different headlines should hash to different photos in the multi-photo pool
+  assert.ok(photo1.url !== photo2.url, 'Distinct stories should receive different images from pool');
+});
+
+test('selectImage handles item safely without throwing on sourceUrl', async () => {
+  const item = {
+    title: 'Test Article Title',
+    sourceUrl: 'https://example.com/item-1',
+    sourceName: 'Sample News',
+    category: 'jigawa',
+    region: 'jigawa',
+  };
+  const img = await selectImage(item, { title: item.title });
+  assert.ok(img, 'Should return image object');
+  assert.ok(img.url, 'Image object should have url');
+  assert.ok(img.caption, 'Image object should have caption');
+});
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 // Wait for all async tests to settle
@@ -329,3 +400,4 @@ setTimeout(() => {
   console.log('════════════════════════════════════════\n');
   process.exit(failed > 0 ? 1 : 0);
 }, 500);
+
