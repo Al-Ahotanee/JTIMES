@@ -1058,6 +1058,236 @@ app.post('/api/newsroom/run', requireAuth, requireRole('ADMIN'), async (req, res
   newsroom.runNewsroom({ force: true }).catch((err) => logger.error('Manual run failed:', err.message));
 });
 
+// =====================================================================
+// HYBRID NEWS AGGREGATOR ENDPOINTS
+// =====================================================================
+
+// GET /api/aggregator/items — list aggregated stories with region, source, status, search filters
+app.get('/api/aggregator/items', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
+  const { region, status, source, q, pageSize: ps, page: pg } = req.query;
+  const pageSize = Math.min(Math.max(parseInt(ps) || 24, 1), 100);
+  const page     = Math.max(parseInt(pg) || 1, 1);
+  const where    = {};
+
+  if (status && status !== 'ALL') {
+    where.status = status;
+  }
+  if (source && source.trim()) {
+    where.sourceName = { contains: source.trim(), mode: 'insensitive' };
+  }
+  if (q && typeof q === 'string' && q.trim()) {
+    const term = q.trim();
+    where.OR = [
+      { sourceTitle: { contains: term, mode: 'insensitive' } },
+      { sourceName: { contains: term, mode: 'insensitive' } },
+    ];
+  }
+
+  // Fetch items
+  let [items, total] = await Promise.all([
+    prisma.newsroomItem.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+      include: {
+        article: {
+          select: {
+            id: true,
+            title: true,
+            slug: true,
+            status: true,
+            excerpt: true,
+            featuredImage: true,
+            imageCaption: true,
+            publishedAt: true,
+          },
+        },
+      },
+    }),
+    prisma.newsroomItem.count({ where }),
+  ]);
+
+  // Client-safe region filtering if region specified
+  if (region && region !== 'all') {
+    items = items.filter(item => {
+      const itemRegion = item.rawData?.region || (item.category === 'jigawa' || item.category === 'buji' ? 'jigawa' : 'nigeria');
+      return itemRegion.toLowerCase() === region.toLowerCase();
+    });
+  }
+
+  res.json({
+    items,
+    page,
+    pageSize,
+    total,
+    totalPages: Math.ceil(total / pageSize) || 1,
+  });
+});
+
+// GET /api/aggregator/stats — summary counts
+app.get('/api/aggregator/stats', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
+  const [total, discovered, drafted, published] = await Promise.all([
+    prisma.newsroomItem.count(),
+    prisma.newsroomItem.count({ where: { status: 'DISCOVERED' } }),
+    prisma.newsroomItem.count({ where: { status: 'DRAFTED' } }),
+    prisma.newsroomItem.count({ where: { status: 'PUBLISHED' } }),
+  ]);
+
+  // Regional breakdown by inspecting recent items
+  const recentItems = await prisma.newsroomItem.findMany({
+    select: { rawData: true, category: true },
+    take: 1000,
+  });
+  let jigawa = 0, nigeria = 0, africa = 0, world = 0;
+  for (const it of recentItems) {
+    const r = it.rawData?.region || (it.category === 'jigawa' || it.category === 'buji' ? 'jigawa' : 'nigeria');
+    if (r === 'jigawa') jigawa++;
+    else if (r === 'africa') africa++;
+    else if (r === 'world') world++;
+    else nigeria++;
+  }
+
+  res.json({ total, discovered, drafted, published, jigawa, nigeria, africa, world });
+});
+
+// POST /api/aggregator/scan — trigger on-demand RSS discovery scan
+app.post('/api/aggregator/scan', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
+  const logger = require('./newsroom/logger.js');
+  const { discoverStories } = require('./newsroom/agent.js');
+  const SOURCES = require('./newsroom/sources.js');
+
+  try {
+    logger.info(`[AGGREGATOR] Manual scan requested by ${req.user.email}`);
+    const { items: rawItems, stats } = await discoverStories(SOURCES);
+    let newSaved = 0;
+
+    for (const item of rawItems) {
+      try {
+        const existing = await prisma.newsroomItem.findUnique({ where: { sourceUrl: item.sourceUrl } });
+        if (!existing) {
+          await prisma.newsroomItem.create({
+            data: {
+              sourceUrl: item.sourceUrl,
+              sourceName: item.sourceName,
+              sourceTitle: item.title,
+              contentHash: item.contentHash,
+              status: 'DISCOVERED',
+              category: item.category || 'jigawa',
+              rawData: {
+                snippet: item.content,
+                originalImageUrl: item.imageUrl,
+                region: item.region || 'nigeria',
+                publishedAt: item.publishedAt,
+                author: item.author,
+              },
+            },
+          });
+          newSaved++;
+        }
+      } catch {}
+    }
+
+    logger.info(`[AGGREGATOR] Scan complete: ${rawItems.length} discovered, ${newSaved} newly saved`);
+    res.json({
+      success: true,
+      totalDiscovered: rawItems.length,
+      newSaved,
+      stats,
+    });
+  } catch (err) {
+    logger.error(`[AGGREGATOR] Scan failed: ${err.message}`);
+    res.status(500).json({ error: `Aggregator scan failed: ${err.message}` });
+  }
+});
+
+// POST /api/aggregator/generate/:id — AI synthesize & draft a single story
+app.post('/api/aggregator/generate/:id', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
+  const logger = require('./newsroom/logger.js');
+  const { generateDraftFromAggregated } = require('./newsroom/agent.js');
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).json({ error: 'Valid newsroom item ID is required.' });
+
+  const item = await prisma.newsroomItem.findUnique({ where: { id } });
+  if (!item) return res.status(404).json({ error: 'Newsroom item not found.' });
+
+  try {
+    const result = await generateDraftFromAggregated(item, req.user, prisma);
+    res.json({
+      success: true,
+      message: 'Article drafted successfully.',
+      article: result.article,
+      newsroomItem: result.newsroomItem,
+    });
+  } catch (err) {
+    logger.error(`[AGGREGATOR] Draft generation failed for item #${id}: ${err.message}`);
+    res.status(500).json({ error: `AI drafting failed: ${err.message}` });
+  }
+});
+
+// POST /api/aggregator/batch-generate — AI synthesize & draft multiple stories
+app.post('/api/aggregator/batch-generate', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
+  const logger = require('./newsroom/logger.js');
+  const { generateDraftFromAggregated } = require('./newsroom/agent.js');
+  const { ids } = req.body || {};
+  if (!Array.isArray(ids) || !ids.length) {
+    return res.status(400).json({ error: 'Array of item IDs is required.' });
+  }
+
+  const items = await prisma.newsroomItem.findMany({
+    where: { id: { in: ids.map((n) => parseInt(n, 10)).filter(Boolean) } },
+  });
+
+  const results = [];
+  let draftedCount = 0;
+  let failedCount = 0;
+
+  for (const item of items) {
+    try {
+      const resItem = await generateDraftFromAggregated(item, req.user, prisma);
+      draftedCount++;
+      results.push({ id: item.id, success: true, articleId: resItem.article.id });
+    } catch (err) {
+      failedCount++;
+      logger.warn(`Batch draft failed for item #${item.id}: ${err.message}`);
+      results.push({ id: item.id, success: false, error: err.message });
+    }
+  }
+
+  res.json({
+    success: true,
+    total: items.length,
+    draftedCount,
+    failedCount,
+    results,
+  });
+});
+
+// POST /api/aggregator/dismiss/:id — dismiss an aggregated story
+app.post('/api/aggregator/dismiss/:id', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).json({ error: 'Valid ID required.' });
+  await prisma.newsroomItem.update({
+    where: { id },
+    data: { status: 'REJECTED' },
+  });
+  res.json({ success: true, message: 'Story dismissed.' });
+});
+
+// POST /api/aggregator/batch-dismiss — bulk dismiss stories
+app.post('/api/aggregator/batch-dismiss', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
+  const { ids } = req.body || {};
+  if (!Array.isArray(ids) || !ids.length) {
+    return res.status(400).json({ error: 'Array of item IDs is required.' });
+  }
+  const cleanIds = ids.map((n) => parseInt(n, 10)).filter(Boolean);
+  await prisma.newsroomItem.updateMany({
+    where: { id: { in: cleanIds } },
+    data: { status: 'REJECTED' },
+  });
+  res.json({ success: true, count: cleanIds.length });
+});
+
 // ---------------------------------------------------------------------
 // Static frontend (single Render Web Service serves the Vue build)
 // ---------------------------------------------------------------------

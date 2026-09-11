@@ -31,6 +31,7 @@ const {
   WRITE_PROMPT,
   SEO_PROMPT,
   IMAGE_BRIEF_PROMPT,
+  AGGREGATOR_REPHRASE_PROMPT,
 } = require('./prompts.js');
 
 const { selectImage } = require('./images.js');
@@ -523,6 +524,16 @@ function createAiClient(config) {
             logger.warn(`Gemini ${err.isRateLimit ? 'rate limit (429)' : 'transient error'} retry ${attempt + 1}/${retries} in ${Math.round(delay / 1000)}s`);
             await new Promise((r) => setTimeout(r, delay));
           } else {
+            // If Gemini fails and GROQ_API_KEY is available, attempt Groq fallback
+            const groqKey = (config.groqApiKey || process.env.GROQ_API_KEY || '').trim();
+            if (groqKey) {
+              logger.warn(`Gemini call failed (${err.message}). Attempting automatic fallback to Groq...`);
+              try {
+                return await callGroq(prompt, groqKey, config.groqModel || 'llama-3.3-70b-versatile');
+              } catch (groqErr) {
+                logger.error(`Groq fallback also failed: ${groqErr.message}`);
+              }
+            }
             throw err;
           }
         }
@@ -532,7 +543,58 @@ function createAiClient(config) {
     return { chat: callGemini };
   }
 
-  throw new Error(`Unsupported AI_PROVIDER: "${provider}". Only "gemini" is currently supported.`);
+  if (provider === 'groq') {
+    const groqKey = (config.groqApiKey || process.env.GROQ_API_KEY || '').trim();
+    if (!groqKey) throw new Error('GROQ_API_KEY is not set.');
+    return {
+      chat: (prompt) => callGroq(prompt, groqKey, config.groqModel || 'llama-3.3-70b-versatile'),
+    };
+  }
+
+  throw new Error(`Unsupported AI_PROVIDER: "${provider}". Supported providers: "gemini", "groq".`);
+}
+
+/**
+ * Call Groq OpenAI-compatible API endpoint.
+ */
+function callGroq(prompt, apiKey, model = 'llama-3.3-70b-versatile') {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({
+      model,
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.2,
+    });
+    const data = Buffer.from(body);
+    const req = https.request({
+      hostname: 'api.groq.com',
+      path: '/openai/v1/chat/completions',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': data.byteLength,
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      timeout: 45000,
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(Buffer.concat(chunks).toString());
+          if (res.statusCode >= 400) {
+            return reject(new Error(`Groq HTTP ${res.statusCode}: ${parsed?.error?.message || 'Unknown error'}`));
+          }
+          resolve(parsed.choices?.[0]?.message?.content || '');
+        } catch (err) {
+          reject(err);
+        }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('Groq request timed out')); });
+    req.write(data);
+    req.end();
+  });
 }
 
 /**
@@ -980,6 +1042,149 @@ async function processStory(item, aiClient, config, recentArticles, prismaClient
   }
 }
 
+/**
+ * Generate a complete, plagiarism-free draft news article from an aggregated RSS item.
+ * @param {object} item  NewsroomItem or raw aggregated item
+ * @param {object} [user] Authenticated admin/editor requesting the draft
+ * @param {object} [prismaClient] Direct PrismaClient instance
+ * @param {object} [customConfig]
+ * @returns {Promise<{ article: object, newsroomItem: object }>}
+ */
+async function generateDraftFromAggregated(item, user = null, prismaClient = null, customConfig = null) {
+  const cfg = customConfig || require('./config.js');
+  const aiClient = createAiClient(cfg);
+
+  logger.info(`[HYBRID AGGREGATOR] Synthesizing draft for: "${item.sourceTitle || item.title}" from ${item.sourceName}...`);
+
+  // 1. Rephrase & Deep Human-Toned News Report
+  const prompt = AGGREGATOR_REPHRASE_PROMPT(item);
+  const rawAiResponse = await aiClient.chat(prompt);
+  const aiData = parseAiJson(rawAiResponse);
+
+  if (!aiData || !aiData.title || !aiData.content) {
+    throw new Error('AI generation failed to return valid article structure.');
+  }
+
+  // 2. Resolve image: source og:image -> Pollinations.ai 16:9 illustration -> curated fallback
+  const categorySlug = (aiData.category || item.category || 'jigawa').toLowerCase();
+  const region = (item.region || 'nigeria').toLowerCase();
+  const rawImage = item.imageUrl || item.rawData?.originalImageUrl || item.rawData?.imageUrl;
+
+  const image = await selectImage(
+    rawImage,
+    item.sourceUrl,
+    aiData.title,
+    categorySlug,
+    region,
+    aiData.imagePrompt || aiData.title
+  );
+
+  const prisma = prismaClient;
+  if (!prisma) {
+    throw new Error('Database client is required to save drafted article.');
+  }
+
+  // 3. Resolve Category
+  let category = await prisma.category.findUnique({ where: { slug: categorySlug } });
+  if (!category) {
+    category = await prisma.category.findFirst({ where: { slug: 'jigawa' } }) ||
+               await prisma.category.findFirst();
+  }
+  if (!category) throw new Error('No categories found in database.');
+
+  // 4. Resolve Author
+  let authorId = user?.id;
+  if (!authorId) {
+    const defaultAuthor = await prisma.user.findFirst({ where: { role: { in: ['ADMIN', 'EDITOR'] } } });
+    authorId = defaultAuthor ? defaultAuthor.id : 1;
+  }
+
+  // 5. Unique slug
+  const slugBase = (aiData.title || 'story')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, '')
+    .trim()
+    .replace(/\s+/g, '-')
+    .slice(0, 80) || 'news-report';
+  const slug = `${slugBase}-${Date.now().toString(36)}`;
+
+  // 6. Build full article body HTML
+  const fullBody = [
+    `<p><em>By Jigawa Times Editorial Desk</em></p>`,
+    aiData.content,
+    `<hr />`,
+    `<p style="font-size: 0.9em; color: #64748b;"><em>Reporting corroborated from verified public dispatches and coverage by <strong>${item.sourceName || 'News Agencies'}</strong> (${item.publishedAt ? new Date(item.publishedAt).toLocaleDateString('en-GB') : 'Recent'}). Researched, synthesized, and verified under the Jigawa Times editorial charter.</em></p>`,
+    item.sourceUrl ? `<p style="font-size: 0.85em; color: #94a3b8;">Original reference: <a href="${item.sourceUrl}" target="_blank" rel="noopener noreferrer">${item.sourceName}</a></p>` : '',
+  ].filter(Boolean).join('\n');
+
+  // 7. Create Article as DRAFT
+  const tagsList = Array.isArray(aiData.tags) && aiData.tags.length ? aiData.tags : [categorySlug, region];
+  const article = await prisma.article.create({
+    data: {
+      title: aiData.title,
+      slug,
+      excerpt: aiData.excerpt || '',
+      content: fullBody,
+      categoryId: category.id,
+      authorId,
+      featuredImage: image?.url || null,
+      imageCaption: aiData.imageCaption || image?.caption || null,
+      isBreaking: false,
+      isFeatured: false,
+      status: 'DRAFT',
+      tags: {
+        create: await Promise.all(
+          tagsList.map(async (name) => {
+            const tagSlug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 50);
+            return {
+              tag: {
+                connectOrCreate: {
+                  where: { slug: tagSlug },
+                  create: { name, slug: tagSlug },
+                },
+              },
+            };
+          })
+        ),
+      },
+    },
+  });
+
+  // 8. Record Editorial Action
+  await prisma.editorialAction.create({
+    data: {
+      articleId: article.id,
+      userId: authorId,
+      action: 'DRAFT',
+      note: `Drafted by Hybrid News Aggregator from ${item.sourceName}`,
+    },
+  });
+
+  // 9. Update NewsroomItem if id provided
+  let updatedNewsroomItem = null;
+  if (item.id) {
+    updatedNewsroomItem = await prisma.newsroomItem.update({
+      where: { id: item.id },
+      data: {
+        status: 'DRAFTED',
+        articleId: article.id,
+        category: categorySlug,
+        verification: {
+          ai_model: cfg.geminiModel || 'gemini-3.5-flash',
+          rephrased: true,
+          source: item.sourceName,
+          sourceUrl: item.sourceUrl,
+          image_sourced: image?.type || 'generated',
+          drafted_at: new Date().toISOString(),
+        },
+      },
+    });
+  }
+
+  logger.info(`[HYBRID AGGREGATOR SUCCESS] Article #${article.id} drafted ("${article.title.slice(0, 50)}...")`);
+  return { article, newsroomItem: updatedNewsroomItem };
+}
+
 module.exports = {
   discoverStories,
   deduplicateItems,
@@ -988,6 +1193,7 @@ module.exports = {
   writeArticle,
   buildSeoMeta,
   processStory,
+  generateDraftFromAggregated,
   createAiClient,
   parseAiJson,
   parseRss,

@@ -254,6 +254,57 @@ CRITICAL:
 - Never suggest generating a realistic scene that could be mistaken for a photograph.
 `.trim();
 
+// ---------------------------------------------------------------------------
+// 7. HYBRID AGGREGATOR REPHRASE & DEEP DRAFT PROMPT
+// Rewrites, contextualizes, and expands aggregated news stories into comprehensive,
+// human-toned, original journalism to strictly avoid plagiarism.
+// ---------------------------------------------------------------------------
+const AGGREGATOR_REPHRASE_PROMPT = (item) => `
+You are a senior investigative editor and chief correspondent at Jigawa Times, Nigeria's premier independent newspaper.
+
+You have received the following sourced news item from an aggregated RSS feed:
+
+ORIGINAL SOURCE METADATA:
+Title: ${item.sourceTitle || item.title || ''}
+Source: ${item.sourceName || ''}
+Region: ${item.region || 'nigeria'}
+Published Date: ${item.publishedAt || 'Recent'}
+Source URL: ${item.sourceUrl || ''}
+
+ORIGINAL SOURCE CONTENT / SNIPPET:
+${item.content || item.sourceTitle || ''}
+
+YOUR TASK:
+Transform this sourced news item into an authoritative, detailed, and completely ORIGINAL news article written in an authentic, engaging human journalistic voice.
+
+CRITICAL ANTI-PLAGIARISM & ETHICAL RULES:
+1. STRICTLY NO PLAGIARISM: Do NOT copy-paste sentences or direct phrasing from the source headline or snippet. Completely rephrase, restructure, and synthesize the information in fresh, compelling language.
+2. PRESERVE ACCURACY: Retain all verifiable facts, names of officials, entities, numbers, dates, and locations. Do NOT hallucinate or fabricate facts.
+3. HUMAN TONE & DEPTH: Write with the depth, clarity, and seriousness of premier national dailies (like Premium Times or Financial Times). Use smooth narrative transitions.
+4. LOCAL CONTEXT & IMPLICATIONS: Clearly explain the broader context and what this development means for Nigeria, Northern Nigeria, or Jigawa State citizens where applicable.
+5. STRUCTURE:
+   - Compelling original headline (not copying the source).
+   - Engaging lead paragraph answering Who, What, When, Where, Why.
+   - 6 to 9 in-depth paragraphs formatted with semantic HTML:
+     - Clear <h3> subheadings dividing major themes.
+     - Direct or attributed quotes inside <blockquote> tags.
+     - Background context, legal or historical precedents.
+     - Stakeholder reactions or community impacts.
+     - Forward-looking analysis on next steps or upcoming developments.
+   - Sources attribution footnote acknowledging ${item.sourceName || 'public records'}.
+
+Return JSON with EXACTLY these fields:
+{
+  "title": string (engaging, original headline, completely rephrased),
+  "excerpt": string (2-sentence punchy executive summary, 40-50 words),
+  "content": string (comprehensive, multi-paragraph semantic HTML containing <p>, <h3>, <blockquote>, <strong>),
+  "category": "buji" | "jigawa" | "politics" | "business" | "education" | "investigations",
+  "tags": [string, string, string, string],
+  "imagePrompt": string (contextual description for a 16:9 news illustration without text or fake faces),
+  "imageCaption": string (detailed editorial caption explaining the subject matter)
+}
+`.trim();
+
 module.exports = {
   CLASSIFY_PROMPT,
   DUPLICATE_PROMPT,
@@ -261,4 +312,5 @@ module.exports = {
   WRITE_PROMPT,
   SEO_PROMPT,
   IMAGE_BRIEF_PROMPT,
+  AGGREGATOR_REPHRASE_PROMPT,
 };

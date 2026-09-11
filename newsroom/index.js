@@ -242,6 +242,39 @@ async function runNewsroom(options = {}) {
       return { discovered: 0, processed: 0, published: 0, failed: 0 };
     }
 
+    // Persist all newly discovered raw items into the Aggregator database
+    if (prismaClient) {
+      let newAggregatedCount = 0;
+      for (const item of rawItems) {
+        try {
+          const existing = await prismaClient.newsroomItem.findUnique({ where: { sourceUrl: item.sourceUrl } });
+          if (!existing) {
+            await prismaClient.newsroomItem.create({
+              data: {
+                sourceUrl: item.sourceUrl,
+                sourceName: item.sourceName,
+                sourceTitle: item.title,
+                contentHash: item.contentHash,
+                status: 'DISCOVERED',
+                category: item.category || 'jigawa',
+                rawData: {
+                  snippet: item.content,
+                  originalImageUrl: item.imageUrl,
+                  region: item.region || 'nigeria',
+                  publishedAt: item.publishedAt,
+                  author: item.author,
+                },
+              },
+            });
+            newAggregatedCount++;
+          }
+        } catch {}
+      }
+      if (newAggregatedCount > 0) {
+        logger.info(`[AGGREGATOR] Saved ${newAggregatedCount} new unique stories into aggregator feed`);
+      }
+    }
+
     if (_shouldAbortScan) {
       logger.info('Scan aborted by admin after discovery stage.');
       return { discovered: rawItems.length, aborted: true };

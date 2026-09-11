@@ -2018,6 +2018,837 @@ export const AdminNewsroom = defineComponent({
 });
 
 // -----------------------------------------------------------------------
+// HYBRID NEWS AGGREGATOR
+// -----------------------------------------------------------------------
+
+export const AdminAggregator = defineComponent({
+  setup() {
+    const router         = useRouter();
+    const items          = ref([]);
+    const stats          = reactive({ total: 0, discovered: 0, drafted: 0, published: 0, jigawa: 0, nigeria: 0, africa: 0, world: 0 });
+    const activeRegion   = ref('all');
+    const activeStatus   = ref('ALL');
+    const activeSource   = ref('');
+    const searchQuery    = ref('');
+    const page           = ref(1);
+    const pageSize       = ref(24);
+    const total          = ref(0);
+    const totalPages     = ref(1);
+    const loading        = ref(true);
+    const scanning       = ref(false);
+    const generatingId   = ref(null);
+    const selectedIds    = ref([]);
+    const viewMode       = ref('grid');
+
+    const engine = reactive({
+      isPaused: false,
+      isRunning: false,
+      inWindow: false,
+      currentWindow: null,
+      nextWindow: '08:00 - 09:00 WAT',
+      currentTimeWat: '',
+      windows: ['08:00 - 09:00 WAT', '13:00 - 14:00 WAT', '19:00 - 20:00 WAT', '00:00 - 01:00 WAT'],
+    });
+
+    const previewModal = reactive({
+      show: false,
+      item: null,
+      publishing: false,
+    });
+
+    const sourcesList = [
+      'Google News – Jigawa',
+      'Google News – Dutse & Buji',
+      'Daily Trust – Northern News',
+      'Jigawa State Government',
+      'Channels Television',
+      'Vanguard News',
+      'Punch Newspapers',
+      'Premium Times',
+      'Tribune Online',
+      'BBC News Africa',
+      'AllAfrica',
+      'AfricaNews',
+      'BBC News World',
+      'Al Jazeera English',
+      'The Guardian World',
+    ];
+
+    let pollTimer = null;
+
+    const fetchStatus = async () => {
+      try {
+        const res = await api.get('/api/newsroom/status');
+        Object.assign(engine, res);
+      } catch {}
+    };
+
+    const fetchStats = async () => {
+      try {
+        const res = await api.get('/api/aggregator/stats');
+        Object.assign(stats, res);
+      } catch {}
+    };
+
+    const fetchItems = async () => {
+      loading.value = true;
+      try {
+        const params = new URLSearchParams();
+        params.append('page', page.value);
+        params.append('pageSize', pageSize.value);
+        if (activeRegion.value && activeRegion.value !== 'all') params.append('region', activeRegion.value);
+        if (activeStatus.value && activeStatus.value !== 'ALL') params.append('status', activeStatus.value);
+        if (activeSource.value) params.append('source', activeSource.value);
+        if (searchQuery.value && searchQuery.value.trim()) params.append('q', searchQuery.value.trim());
+
+        const res = await api.get(`/api/aggregator/items?${params.toString()}`);
+        items.value = res.items || [];
+        total.value = res.total || 0;
+        totalPages.value = res.totalPages || 1;
+      } catch (err) {
+        notify.error('Feed Error', err.message || 'Could not load aggregated news.');
+      } finally {
+        loading.value = false;
+      }
+    };
+
+    const scanFeeds = async () => {
+      scanning.value = true;
+      try {
+        const res = await api.post('/api/aggregator/scan');
+        notify.success('Feed Scan Completed', `Discovered ${res.totalDiscovered} stories across Jigawa, Nigeria, Africa, and Global feeds.`);
+        await Promise.all([fetchStats(), fetchItems()]);
+      } catch (err) {
+        notify.error('Scan Failed', err.message || 'Failed to scan news feeds.');
+      } finally {
+        scanning.value = false;
+      }
+    };
+
+    const togglePause = async () => {
+      const willPause = !engine.isPaused;
+      confirmDialog({
+        message: willPause
+          ? 'Pause scheduled automated RSS background scans indefinitely? You can still manually scan feeds anytime.'
+          : 'Resume automated background scans according to the 4 daily operational windows?',
+        header: willPause ? 'Pause Automated Scans' : 'Resume Automated Scans',
+        icon: willPause ? 'fa-solid fa-circle-pause' : 'fa-solid fa-circle-play',
+        accept: async () => {
+          try {
+            if (willPause) {
+              const res = await api.post('/api/newsroom/engine/pause');
+              engine.isPaused = res.isPaused;
+              notify.warn('Aggregator Paused', 'Automated RSS scans are now paused indefinitely.');
+            } else {
+              const res = await api.post('/api/newsroom/engine/resume');
+              engine.isPaused = res.isPaused;
+              notify.success('Aggregator Resumed', 'Automated scans resumed for operational windows.');
+            }
+          } catch (err) {
+            notify.error('Action Failed', err.message);
+          }
+        },
+      });
+    };
+
+    const draftStory = async (item) => {
+      generatingId.value = item.id;
+      try {
+        const res = await api.post(`/api/aggregator/generate/${item.id}`);
+        notify.success('Draft Created with AI', `"${res.article.title.slice(0, 45)}..." was successfully generated and saved to database as DRAFT.`);
+        item.status = 'DRAFTED';
+        item.articleId = res.article.id;
+        item.article = res.article;
+        fetchStats();
+      } catch (err) {
+        notify.error('Drafting Failed', err.message || 'AI synthesis failed.');
+      } finally {
+        generatingId.value = null;
+      }
+    };
+
+    const batchDraft = () => {
+      if (!selectedIds.value.length) return;
+      confirmDialog({
+        message: `Generate and draft ${selectedIds.value.length} selected stories with AI? Each story will be rewritten in an original human journalistic voice with 16:9 imagery and saved as a DRAFT.`,
+        header: 'Confirm Batch AI Drafting',
+        icon: 'fa-solid fa-wand-magic-sparkles',
+        accept: async () => {
+          try {
+            const res = await api.post('/api/aggregator/batch-generate', { ids: selectedIds.value });
+            notify.success('Batch Drafting Completed', `Successfully drafted ${res.draftedCount} stories (${res.failedCount} failed).`);
+            selectedIds.value = [];
+            await Promise.all([fetchStats(), fetchItems()]);
+          } catch (err) {
+            notify.error('Batch Draft Failed', err.message);
+          }
+        },
+      });
+    };
+
+    const dismissStory = async (item) => {
+      try {
+        await api.post(`/api/aggregator/dismiss/${item.id}`);
+        item.status = 'REJECTED';
+        notify.info('Story Dismissed', 'Item moved to dismissed status.');
+        fetchStats();
+      } catch (err) {
+        notify.error('Dismiss Failed', err.message);
+      }
+    };
+
+    const batchDismiss = () => {
+      if (!selectedIds.value.length) return;
+      confirmDialog({
+        message: `Dismiss ${selectedIds.value.length} selected stories?`,
+        header: 'Confirm Batch Dismiss',
+        icon: 'fa-solid fa-trash-can',
+        accept: async () => {
+          try {
+            await api.post('/api/aggregator/batch-dismiss', { ids: selectedIds.value });
+            notify.info('Batch Dismissed', `${selectedIds.value.length} stories dismissed.`);
+            selectedIds.value = [];
+            await Promise.all([fetchStats(), fetchItems()]);
+          } catch (err) {
+            notify.error('Dismiss Failed', err.message);
+          }
+        },
+      });
+    };
+
+    const openEditor = (articleId) => {
+      router.push(`/reporter/edit/${articleId}`);
+    };
+
+    const openPreview = (item) => {
+      previewModal.item = item;
+      previewModal.show = true;
+    };
+
+    const publishFromModal = async () => {
+      if (!previewModal.item?.articleId) return;
+      previewModal.publishing = true;
+      try {
+        await api.post(`/api/articles/${previewModal.item.articleId}/publish`);
+        notify.success('Article Published', 'The story is now live on the public newspaper!');
+        previewModal.item.status = 'PUBLISHED';
+        if (previewModal.item.article) previewModal.item.article.status = 'PUBLISHED';
+        previewModal.show = false;
+        fetchStats();
+      } catch (err) {
+        notify.error('Publish Failed', err.message);
+      } finally {
+        previewModal.publishing = false;
+      }
+    };
+
+    const toggleSelect = (id) => {
+      const idx = selectedIds.value.indexOf(id);
+      if (idx === -1) selectedIds.value.push(id);
+      else selectedIds.value.splice(idx, 1);
+    };
+
+    const isAllSelected = computed(() => {
+      return items.value.length > 0 && items.value.every((it) => selectedIds.value.includes(it.id));
+    });
+
+    const toggleSelectAll = () => {
+      if (isAllSelected.value) {
+        selectedIds.value = [];
+      } else {
+        selectedIds.value = items.value.map((it) => it.id);
+      }
+    };
+
+    const setRegion = (reg) => {
+      activeRegion.value = reg;
+      page.value = 1;
+      fetchItems();
+    };
+
+    const getItemRegion = (it) => {
+      return (it.rawData?.region || (it.category === 'jigawa' || it.category === 'buji' ? 'jigawa' : 'nigeria')).toLowerCase();
+    };
+
+    const getRegionBadgeClass = (reg) => {
+      switch (reg) {
+        case 'jigawa': return 'badge-jigawa';
+        case 'africa': return 'badge-africa';
+        case 'world': return 'badge-world';
+        default: return 'badge-nigeria';
+      }
+    };
+
+    const getRegionLabel = (reg) => {
+      switch (reg) {
+        case 'jigawa': return 'Jigawa State';
+        case 'africa': return 'Africa';
+        case 'world': return 'Global';
+        default: return 'Nigeria';
+      }
+    };
+
+    onMounted(async () => {
+      await Promise.all([fetchStatus(), fetchStats(), fetchItems()]);
+      pollTimer = setInterval(fetchStatus, 30000);
+    });
+
+    onUnmounted(() => {
+      if (pollTimer) clearInterval(pollTimer);
+    });
+
+    watch([activeStatus, activeSource], () => {
+      page.value = 1;
+      fetchItems();
+    });
+
+    return {
+      router,
+      items,
+      stats,
+      activeRegion,
+      activeStatus,
+      activeSource,
+      searchQuery,
+      page,
+      pageSize,
+      total,
+      totalPages,
+      loading,
+      scanning,
+      generatingId,
+      selectedIds,
+      viewMode,
+      engine,
+      previewModal,
+      sourcesList,
+      scanFeeds,
+      togglePause,
+      draftStory,
+      batchDraft,
+      dismissStory,
+      batchDismiss,
+      openEditor,
+      openPreview,
+      publishFromModal,
+      toggleSelect,
+      isAllSelected,
+      toggleSelectAll,
+      setRegion,
+      getItemRegion,
+      getRegionBadgeClass,
+      getRegionLabel,
+      fetchItems,
+      timeAgo,
+    };
+  },
+  template: `
+    <dash-shell title="Hybrid News Aggregator">
+      <div class="aggregator-page">
+        <!-- Header & Engine Bar -->
+        <div class="aggregator-header-box">
+          <div class="header-titles">
+            <h1 class="page-main-title">
+              <i class="fa-solid fa-satellite-dish" style="color:var(--accent);margin-right:8px;"></i>
+              Hybrid News Aggregator
+            </h1>
+            <p class="page-sub-text">
+              Multi-tier real-time news aggregation across <strong>Jigawa State</strong>, <strong>Nigeria</strong>, <strong>Africa</strong>, and <strong>World</strong> feeds.
+              Synthesize original, in-depth reports with AI and publish under editorial supervision.
+            </p>
+          </div>
+
+          <div class="header-engine-status">
+            <div class="engine-time-chip" title="West Africa Time (UTC+1)">
+              <i class="fa-regular fa-clock"></i>
+              <span>{{ engine.currentTimeWat || 'WAT Lagos' }}</span>
+            </div>
+
+            <div class="engine-state-chip" :class="engine.isPaused ? 'chip-paused' : engine.inWindow ? 'chip-active' : 'chip-standby'">
+              <span class="status-pulse-dot" :class="engine.isPaused ? 'dot-paused' : engine.inWindow ? 'dot-active' : 'dot-standby'"></span>
+              <span>{{ engine.isPaused ? 'Engine Paused' : engine.inWindow ? 'Scan Window Active' : 'Window Standby' }}</span>
+            </div>
+
+            <div class="engine-actions-group">
+              <button class="btn btn-primary" :disabled="scanning" @click="scanFeeds">
+                <i :class="scanning ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-rotate'" aria-hidden="true"></i>
+                <span>{{ scanning ? 'Scanning Feeds…' : 'Scan Feeds Now' }}</span>
+              </button>
+              <button class="btn ghost btn-sm" @click="togglePause" :title="engine.isPaused ? 'Resume scheduled scans' : 'Pause scheduled scans'">
+                <i :class="engine.isPaused ? 'fa-solid fa-play text-success' : 'fa-solid fa-pause text-warning'"></i>
+                <span>{{ engine.isPaused ? 'Resume' : 'Pause' }}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Metrics Cards -->
+        <div class="aggregator-stats-grid">
+          <div class="agg-metric-card">
+            <div class="metric-icon" style="background:#e0f2fe;color:#0284c7;"><i class="fa-solid fa-layer-group"></i></div>
+            <div class="metric-data">
+              <div class="metric-num">{{ stats.total || 0 }}</div>
+              <div class="metric-lbl">Total Sourced</div>
+            </div>
+          </div>
+
+          <div class="agg-metric-card" @click="setRegion('jigawa')" style="cursor:pointer;" :class="{ 'card-active-reg': activeRegion === 'jigawa' }">
+            <div class="metric-icon" style="background:#dcfce7;color:#16a34a;"><i class="fa-solid fa-location-dot"></i></div>
+            <div class="metric-data">
+              <div class="metric-num">{{ stats.jigawa || 0 }}</div>
+              <div class="metric-lbl">Jigawa State</div>
+            </div>
+          </div>
+
+          <div class="agg-metric-card" @click="setRegion('nigeria')" style="cursor:pointer;" :class="{ 'card-active-reg': activeRegion === 'nigeria' }">
+            <div class="metric-icon" style="background:#e0e7ff;color:#4f46e5;"><i class="fa-solid fa-flag"></i></div>
+            <div class="metric-data">
+              <div class="metric-num">{{ stats.nigeria || 0 }}</div>
+              <div class="metric-lbl">Nigeria</div>
+            </div>
+          </div>
+
+          <div class="agg-metric-card" @click="setRegion('africa')" style="cursor:pointer;" :class="{ 'card-active-reg': activeRegion === 'africa' }">
+            <div class="metric-icon" style="background:#fef3c7;color:#d97706;"><i class="fa-solid fa-earth-africa"></i></div>
+            <div class="metric-data">
+              <div class="metric-num">{{ stats.africa || 0 }}</div>
+              <div class="metric-lbl">Africa</div>
+            </div>
+          </div>
+
+          <div class="agg-metric-card" @click="setRegion('world')" style="cursor:pointer;" :class="{ 'card-active-reg': activeRegion === 'world' }">
+            <div class="metric-icon" style="background:#f3e8ff;color:#9333ea;"><i class="fa-solid fa-globe"></i></div>
+            <div class="metric-data">
+              <div class="metric-num">{{ stats.world || 0 }}</div>
+              <div class="metric-lbl">Global</div>
+            </div>
+          </div>
+
+          <div class="agg-metric-card">
+            <div class="metric-icon" style="background:#ecfdf5;color:#059669;"><i class="fa-solid fa-pen-nib"></i></div>
+            <div class="metric-data">
+              <div class="metric-num">{{ stats.drafted || 0 }}</div>
+              <div class="metric-lbl">Ready Drafts</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Regional Filter Tabs -->
+        <div class="aggregator-nav-tabs">
+          <button class="nav-tab-btn" :class="{ 'active': activeRegion === 'all' }" @click="setRegion('all')">
+            <i class="fa-solid fa-globe"></i>
+            <span>All Regions</span>
+            <span class="tab-badge">{{ stats.total || 0 }}</span>
+          </button>
+          <button class="nav-tab-btn" :class="{ 'active': activeRegion === 'jigawa' }" @click="setRegion('jigawa')">
+            <i class="fa-solid fa-location-dot" style="color:#16a34a;"></i>
+            <span>Jigawa (Local)</span>
+            <span class="tab-badge badge-green">{{ stats.jigawa || 0 }}</span>
+          </button>
+          <button class="nav-tab-btn" :class="{ 'active': activeRegion === 'nigeria' }" @click="setRegion('nigeria')">
+            <i class="fa-solid fa-flag" style="color:#2563eb;"></i>
+            <span>Nigeria (National)</span>
+            <span class="tab-badge badge-blue">{{ stats.nigeria || 0 }}</span>
+          </button>
+          <button class="nav-tab-btn" :class="{ 'active': activeRegion === 'africa' }" @click="setRegion('africa')">
+            <i class="fa-solid fa-earth-africa" style="color:#d97706;"></i>
+            <span>Africa (Continental)</span>
+            <span class="tab-badge badge-amber">{{ stats.africa || 0 }}</span>
+          </button>
+          <button class="nav-tab-btn" :class="{ 'active': activeRegion === 'world' }" @click="setRegion('world')">
+            <i class="fa-solid fa-earth-americas" style="color:#9333ea;"></i>
+            <span>World (Global)</span>
+            <span class="tab-badge badge-purple">{{ stats.world || 0 }}</span>
+          </button>
+        </div>
+
+        <!-- Filter & Search Toolbar -->
+        <div class="aggregator-toolbar">
+          <div class="toolbar-left">
+            <div class="search-input-box">
+              <i class="fa-solid fa-magnifying-glass search-icon"></i>
+              <input
+                type="text"
+                v-model="searchQuery"
+                @keyup.enter="fetchItems"
+                placeholder="Search headline or topic..."
+                class="form-input search-input"
+              />
+              <button v-if="searchQuery" class="clear-search-btn" @click="searchQuery=''; fetchItems();">
+                <i class="fa-solid fa-xmark"></i>
+              </button>
+            </div>
+
+            <select v-model="activeSource" class="form-select filter-select">
+              <option value="">All Sources (15 feeds)</option>
+              <option v-for="s in sourcesList" :key="s" :value="s">{{ s }}</option>
+            </select>
+
+            <select v-model="activeStatus" class="form-select filter-select">
+              <option value="ALL">All Statuses</option>
+              <option value="DISCOVERED">Discovered (Ready to Draft)</option>
+              <option value="DRAFTED">Drafted (Ready to Edit)</option>
+              <option value="PUBLISHED">Published</option>
+            </select>
+          </div>
+
+          <div class="toolbar-right">
+            <div class="view-switch-btns">
+              <button class="view-btn" :class="{ 'active': viewMode === 'grid' }" @click="viewMode='grid'" title="Card Grid View">
+                <i class="fa-solid fa-grip"></i>
+              </button>
+              <button class="view-btn" :class="{ 'active': viewMode === 'list' }" @click="viewMode='list'" title="Table List View">
+                <i class="fa-solid fa-list"></i>
+              </button>
+            </div>
+
+            <button class="btn ghost btn-sm" @click="fetchItems" title="Refresh list">
+              <i class="fa-solid fa-rotate-right"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- Batch Operations Bar (when items selected) -->
+        <div v-if="selectedIds.length > 0" class="batch-action-bar animate-fade-in">
+          <div class="batch-count-info">
+            <i class="fa-solid fa-check-double" style="color:var(--accent);"></i>
+            <span><strong>{{ selectedIds.length }}</strong> stories selected</span>
+          </div>
+
+          <div class="batch-buttons">
+            <button class="btn btn-primary btn-sm" @click="batchDraft">
+              <i class="fa-solid fa-wand-magic-sparkles"></i>
+              <span>Batch Draft with AI ({{ selectedIds.length }})</span>
+            </button>
+            <button class="btn ghost btn-sm text-danger" @click="batchDismiss">
+              <i class="fa-solid fa-trash-can"></i>
+              <span>Dismiss Selected</span>
+            </button>
+            <button class="btn ghost btn-sm" @click="selectedIds = []">
+              <span>Clear</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Loading State -->
+        <div v-if="loading" class="aggregator-loading-box">
+          <i class="fa-solid fa-spinner fa-spin" style="font-size:2rem;color:var(--accent);"></i>
+          <p style="margin-top:12px;color:var(--ink-3);">Loading aggregated news feed...</p>
+        </div>
+
+        <!-- Empty State -->
+        <div v-else-if="!items.length" class="aggregator-empty-box">
+          <div class="empty-icon-circle"><i class="fa-solid fa-rss"></i></div>
+          <h3>No stories found for current filter</h3>
+          <p>Click "Scan Feeds Now" above to capture live stories across Jigawa, Nigeria, Africa, and Global feeds.</p>
+          <button class="btn btn-primary" style="margin-top:16px;" @click="scanFeeds">
+            <i class="fa-solid fa-rotate"></i> Scan Feeds Now
+          </button>
+        </div>
+
+        <!-- Feed Cards Grid View -->
+        <div v-else-if="viewMode === 'grid'" class="aggregator-grid">
+          <div
+            v-for="item in items"
+            :key="item.id"
+            class="story-card"
+            :class="{
+              'card-selected': selectedIds.includes(item.id),
+              'card-drafted': item.status === 'DRAFTED',
+              'card-published': item.status === 'PUBLISHED'
+            }"
+          >
+            <!-- Card Header: Checkbox, Region Badge & Source -->
+            <div class="story-card-top">
+              <label class="custom-checkbox-container" @click.stop>
+                <input
+                  type="checkbox"
+                  :checked="selectedIds.includes(item.id)"
+                  @change="toggleSelect(item.id)"
+                />
+                <span class="custom-checkmark"></span>
+              </label>
+
+              <span class="region-pill" :class="getRegionBadgeClass(getItemRegion(item))">
+                {{ getRegionLabel(getItemRegion(item)) }}
+              </span>
+
+              <span class="source-tag" :title="item.sourceName">
+                {{ item.sourceName }}
+              </span>
+            </div>
+
+            <!-- Thumbnail Image -->
+            <div class="story-card-image-wrap">
+              <img
+                v-if="item.article?.featuredImage || item.rawData?.originalImageUrl"
+                :src="item.article?.featuredImage || item.rawData?.originalImageUrl"
+                :alt="item.sourceTitle || item.title"
+                loading="lazy"
+                class="story-card-img"
+              />
+              <div v-else class="story-card-img-placeholder">
+                <i class="fa-solid fa-newspaper" aria-hidden="true"></i>
+              </div>
+
+              <!-- Status Tag Overlay -->
+              <div class="story-status-overlay">
+                <span v-if="item.status === 'DRAFTED'" class="status-pill status-pill-drafted">
+                  <i class="fa-solid fa-file-lines"></i> Drafted
+                </span>
+                <span v-else-if="item.status === 'PUBLISHED'" class="status-pill status-pill-published">
+                  <i class="fa-solid fa-check"></i> Published
+                </span>
+                <span v-else class="status-pill status-pill-discovered">
+                  <i class="fa-solid fa-bolt"></i> Discovered
+                </span>
+              </div>
+            </div>
+
+            <!-- Card Body -->
+            <div class="story-card-content">
+              <div class="story-card-meta">
+                <span class="meta-time">
+                  <i class="fa-regular fa-clock"></i>
+                  {{ timeAgo(item.rawData?.publishedAt || item.createdAt) }}
+                </span>
+              </div>
+
+              <h3 class="story-card-title" :title="item.sourceTitle || item.title">
+                {{ item.sourceTitle || item.title }}
+              </h3>
+
+              <p class="story-card-snippet">
+                {{ (item.rawData?.snippet || item.content || '').slice(0, 160) }}...
+              </p>
+            </div>
+
+            <!-- Card Actions Footer -->
+            <div class="story-card-actions">
+              <div class="action-left">
+                <a
+                  :href="item.sourceUrl"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="action-link-btn"
+                  title="View original article on publisher site"
+                >
+                  <i class="fa-solid fa-arrow-up-right-from-square"></i>
+                </a>
+              </div>
+
+              <div class="action-right">
+                <!-- If Drafted: Edit & Publish / Preview -->
+                <template v-if="item.status === 'DRAFTED'">
+                  <button class="btn btn-sm btn-outline-success" @click="openPreview(item)">
+                    <i class="fa-solid fa-eye"></i> Preview
+                  </button>
+                  <button class="btn btn-sm btn-success" @click="openEditor(item.articleId)">
+                    <i class="fa-solid fa-pen-to-square"></i> Edit & Publish
+                  </button>
+                </template>
+
+                <!-- If Published: View Live -->
+                <template v-else-if="item.status === 'PUBLISHED'">
+                  <router-link
+                    v-if="item.article?.slug"
+                    :to="'/news/' + item.article.slug"
+                    class="btn btn-sm ghost text-success"
+                    target="_blank"
+                  >
+                    <i class="fa-solid fa-globe"></i> View Live
+                  </router-link>
+                </template>
+
+                <!-- If Discovered: Draft with AI -->
+                <template v-else>
+                  <button
+                    class="btn btn-sm btn-primary"
+                    :disabled="generatingId === item.id"
+                    @click="draftStory(item)"
+                  >
+                    <i :class="generatingId === item.id ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-wand-magic-sparkles'"></i>
+                    <span>{{ generatingId === item.id ? 'Drafting…' : 'Draft with AI' }}</span>
+                  </button>
+                </template>
+
+                <button class="btn ghost btn-sm btn-icon" @click="dismissStory(item)" title="Dismiss story">
+                  <i class="fa-solid fa-xmark text-muted"></i>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Feed Table List View -->
+        <div v-else class="aggregator-table-wrap">
+          <table class="aggregator-table">
+            <thead>
+              <tr>
+                <th style="width:36px;">
+                  <label class="custom-checkbox-container">
+                    <input type="checkbox" :checked="isAllSelected" @change="toggleSelectAll" />
+                    <span class="custom-checkmark"></span>
+                  </label>
+                </th>
+                <th style="width:70px;">Media</th>
+                <th>Story Headline & Source</th>
+                <th style="width:110px;">Region</th>
+                <th style="width:110px;">Status</th>
+                <th style="width:110px;">Discovered</th>
+                <th style="width:180px;text-align:right;">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="item in items"
+                :key="item.id"
+                :class="{ 'row-selected': selectedIds.includes(item.id) }"
+              >
+                <td>
+                  <label class="custom-checkbox-container">
+                    <input type="checkbox" :checked="selectedIds.includes(item.id)" @change="toggleSelect(item.id)" />
+                    <span class="custom-checkmark"></span>
+                  </label>
+                </td>
+                <td>
+                  <div class="table-thumb">
+                    <img
+                      v-if="item.article?.featuredImage || item.rawData?.originalImageUrl"
+                      :src="item.article?.featuredImage || item.rawData?.originalImageUrl"
+                      class="table-thumb-img"
+                    />
+                    <i v-else class="fa-solid fa-newspaper text-muted"></i>
+                  </div>
+                </td>
+                <td>
+                  <div class="table-title">{{ item.sourceTitle || item.title }}</div>
+                  <div class="table-sub-source">
+                    <span class="source-name">{{ item.sourceName }}</span>
+                    <a :href="item.sourceUrl" target="_blank" rel="noopener noreferrer" class="source-ext-link">
+                      <i class="fa-solid fa-arrow-up-right-from-square"></i>
+                    </a>
+                  </div>
+                </td>
+                <td>
+                  <span class="region-pill" :class="getRegionBadgeClass(getItemRegion(item))">
+                    {{ getRegionLabel(getItemRegion(item)) }}
+                  </span>
+                </td>
+                <td>
+                  <span v-if="item.status === 'DRAFTED'" class="status-pill status-pill-drafted">Drafted</span>
+                  <span v-else-if="item.status === 'PUBLISHED'" class="status-pill status-pill-published">Published</span>
+                  <span v-else class="status-pill status-pill-discovered">Discovered</span>
+                </td>
+                <td style="font-size:12px;color:var(--ink-4);">
+                  {{ timeAgo(item.rawData?.publishedAt || item.createdAt) }}
+                </td>
+                <td style="text-align:right;">
+                  <template v-if="item.status === 'DRAFTED'">
+                    <button class="btn btn-xs btn-success" @click="openEditor(item.articleId)">
+                      <i class="fa-solid fa-pen-to-square"></i> Edit
+                    </button>
+                  </template>
+                  <template v-else-if="item.status === 'PUBLISHED'">
+                    <router-link v-if="item.article?.slug" :to="'/news/' + item.article.slug" class="btn btn-xs ghost text-success" target="_blank">
+                      Live
+                    </router-link>
+                  </template>
+                  <template v-else>
+                    <button
+                      class="btn btn-xs btn-primary"
+                      :disabled="generatingId === item.id"
+                      @click="draftStory(item)"
+                    >
+                      <i :class="generatingId === item.id ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-wand-magic-sparkles'"></i>
+                      Draft
+                    </button>
+                  </template>
+                  <button class="btn btn-xs ghost btn-icon" @click="dismissStory(item)" title="Dismiss">
+                    <i class="fa-solid fa-xmark"></i>
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Pagination -->
+        <div class="aggregator-pagination-bar" v-if="total > 0">
+          <div class="pagination-info">
+            Showing {{ ((page - 1) * pageSize) + 1 }} to {{ Math.min(page * pageSize, total) }} of {{ total }} stories
+          </div>
+          <div class="pagination-controls">
+            <button class="btn ghost btn-sm" :disabled="page <= 1" @click="page--; fetchItems();">
+              <i class="fa-solid fa-chevron-left"></i> Previous
+            </button>
+            <span class="pagination-current-page">Page {{ page }} of {{ totalPages }}</span>
+            <button class="btn ghost btn-sm" :disabled="page >= totalPages" @click="page++; fetchItems();">
+              Next <i class="fa-solid fa-chevron-right"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- Article Preview & Quick Publish Modal -->
+        <Dialog
+          v-model:visible="previewModal.show"
+          modal
+          header="AI Generated Draft Preview"
+          :style="{ width: '820px', maxWidth: '95vw' }"
+        >
+          <div v-if="previewModal.item?.article" style="padding: 10px 0;">
+            <div v-if="previewModal.item.article.featuredImage" style="margin-bottom:16px;border-radius:8px;overflow:hidden;max-height:340px;">
+              <img :src="previewModal.item.article.featuredImage" style="width:100%;height:auto;object-fit:cover;" />
+              <div v-if="previewModal.item.article.imageCaption" style="font-size:12px;color:var(--ink-4);padding:6px 0;">
+                <i class="fa-solid fa-camera"></i> {{ previewModal.item.article.imageCaption }}
+              </div>
+            </div>
+
+            <h2 style="font-size:1.4rem;font-weight:700;line-height:1.3;margin-bottom:12px;">
+              {{ previewModal.item.article.title }}
+            </h2>
+
+            <div style="display:flex;gap:12px;font-size:12px;color:var(--ink-4);margin-bottom:16px;">
+              <span><strong>Source:</strong> {{ previewModal.item.sourceName }}</span>
+              <span><strong>Status:</strong> {{ previewModal.item.article.status }}</span>
+              <span><strong>Category:</strong> {{ previewModal.item.category }}</span>
+            </div>
+
+            <div
+              v-html="previewModal.item.article.content"
+              style="line-height:1.7;font-size:14px;color:var(--ink-2);max-height:380px;overflow-y:auto;padding-right:10px;border-top:1px solid var(--line-1);padding-top:16px;"
+            ></div>
+          </div>
+
+          <template #footer>
+            <div style="display:flex;justify-content:space-between;width:100%;align-items:center;">
+              <button class="btn ghost" @click="previewModal.show = false">Close</button>
+              <div style="display:flex;gap:8px;">
+                <button
+                  class="btn ghost text-primary"
+                  @click="openEditor(previewModal.item.articleId); previewModal.show = false;"
+                >
+                  <i class="fa-solid fa-pen-to-square"></i> Open Full Editor
+                </button>
+                <button
+                  class="btn btn-success"
+                  :disabled="previewModal.publishing"
+                  @click="publishFromModal"
+                >
+                  <i :class="previewModal.publishing ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-check'"></i>
+                  <span>Publish to Website</span>
+                </button>
+              </div>
+            </div>
+          </template>
+        </Dialog>
+      </div>
+    </dash-shell>
+  `,
+  components: { DashShell },
+});
+
+// -----------------------------------------------------------------------
 // EDITOR DASHBOARD
 // -----------------------------------------------------------------------
 

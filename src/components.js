@@ -20,8 +20,9 @@ export const ADMIN_NAV = [
   {
     label: 'Newsroom',
     items: [
-      { label: 'Overview',      path: '/admin',             icon: 'fa-solid fa-gauge-high' },
-      { label: 'AI Newsroom',   path: '/admin/newsroom',    icon: 'fa-solid fa-robot' },
+      { label: 'Overview',        path: '/admin',             icon: 'fa-solid fa-gauge-high' },
+      { label: 'AI Newsroom',     path: '/admin/newsroom',    icon: 'fa-solid fa-robot' },
+      { label: 'News Aggregator', path: '/admin/aggregator',  icon: 'fa-solid fa-satellite-dish' },
     ],
   },
   {
@@ -51,8 +52,9 @@ export const EDITOR_NAV = [
   {
     label: 'Editorial',
     items: [
-      { label: 'Queue',       path: '/editor',            icon: 'fa-solid fa-list-check' },
-      { label: 'Comments',    path: '/editor/comments',   icon: 'fa-solid fa-comments' },
+      { label: 'Queue',           path: '/editor',            icon: 'fa-solid fa-list-check' },
+      { label: 'News Aggregator', path: '/admin/aggregator',  icon: 'fa-solid fa-satellite-dish' },
+      { label: 'Comments',        path: '/editor/comments',   icon: 'fa-solid fa-comments' },
     ],
   },
   {
