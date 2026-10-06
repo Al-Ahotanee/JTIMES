@@ -22,6 +22,7 @@ const routes = [
   { path: '/admin/comments', component: P.AdminComments, meta: { roles: ['ADMIN'] } },
   { path: '/admin/newsroom', component: P.AdminNewsroom, meta: { roles: ['ADMIN'] } },
   { path: '/admin/aggregator', component: P.AdminAggregator, meta: { roles: ['ADMIN', 'EDITOR'] } },
+  { path: '/admin/ads', component: P.AdminAds, meta: { roles: ['ADMIN'] } },
 
   { path: '/editor', component: P.EditorQueue, meta: { roles: ['ADMIN', 'EDITOR'] } },
   { path: '/editor/comments', component: P.AdminComments, meta: { roles: ['ADMIN', 'EDITOR'] } },

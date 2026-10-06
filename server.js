@@ -239,6 +239,7 @@ function serializeArticle(a) {
     id: a.id, title: a.title, slug: a.slug, excerpt: a.excerpt, content: a.content,
     featuredImage: a.featuredImage, imageCaption: a.imageCaption, status: a.status,
     isBreaking: a.isBreaking, isFeatured: a.isFeatured, views: a.views,
+    isLive: !!a.isLive, scheduledPublishAt: a.scheduledPublishAt,
     publishedAt: a.publishedAt, createdAt: a.createdAt, updatedAt: a.updatedAt,
     author: a.author && { id: a.author.id, name: a.author.name, avatar: a.author.avatar, bio: a.author.bio },
     category: a.category && { id: a.category.id, name: a.category.name, slug: a.category.slug },
@@ -391,7 +392,7 @@ app.put('/api/articles/:id', requireAuth, async (req, res) => {
       return res.status(403).json({ error: 'This article is no longer editable at its current stage.' });
     }
 
-    const { title, excerpt, content, categoryId, featuredImage, imageCaption, isBreaking, isFeatured } = req.body || {};
+    const { title, excerpt, content, categoryId, featuredImage, imageCaption, isBreaking, isFeatured, isLive } = req.body || {};
     const data = {};
     if (title) data.title = title;
     if (excerpt !== undefined) data.excerpt = excerpt;
@@ -402,6 +403,24 @@ app.put('/api/articles/:id', requireAuth, async (req, res) => {
     if (isStaff(req.user)) {
       if (isBreaking !== undefined) data.isBreaking = !!isBreaking;
       if (isFeatured !== undefined) data.isFeatured = !!isFeatured;
+      if (isLive !== undefined) data.isLive = !!isLive;
+    }
+
+    // Auto-create revision snapshot before saving edits
+    if (
+      (title && title !== article.title) ||
+      (content !== undefined && sanitize(content) !== article.content) ||
+      (excerpt !== undefined && excerpt !== article.excerpt)
+    ) {
+      await prisma.articleRevision.create({
+        data: {
+          articleId: id,
+          userId: req.user.id,
+          title: article.title,
+          excerpt: article.excerpt,
+          content: article.content,
+        },
+      }).catch((e) => console.warn('[REVISION SNAPSHOT] Warning:', e.message));
     }
 
     const updated = await prisma.article.update({
@@ -477,6 +496,392 @@ app.post('/api/articles/:id/unpublish', requireAuth, requireRole('ADMIN', 'EDITO
 
 app.post('/api/articles/:id/archive', requireAuth, requireRole('ADMIN', 'EDITOR'), (req, res) =>
   transition(req, res, { from: [], to: 'ARCHIVED', allowedRoles: ['ADMIN', 'EDITOR'], action: 'ARCHIVED' }));
+
+// ---------------------------------------------------------------------
+// SCHEDULED PUBLISHING
+// ---------------------------------------------------------------------
+app.post('/api/articles/:id/schedule', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
+  const id = parseInt(req.params.id);
+  if (!id || isNaN(id)) return res.status(400).json({ error: 'Valid numeric article ID is required.' });
+  const { scheduledPublishAt } = req.body || {};
+  if (!scheduledPublishAt) return res.status(400).json({ error: 'Scheduled publication date/time is required.' });
+
+  const date = new Date(scheduledPublishAt);
+  if (isNaN(date.getTime()) || date <= new Date()) {
+    return res.status(400).json({ error: 'Scheduled publication time must be a future date/time.' });
+  }
+
+  try {
+    const article = await prisma.article.findUnique({ where: { id } });
+    if (!article) return res.status(404).json({ error: 'Article not found.' });
+
+    const updated = await prisma.$transaction([
+      prisma.article.update({
+        where: { id },
+        data: { status: 'SCHEDULED', scheduledPublishAt: date },
+        include: { author: true, category: true, tags: { include: { tag: true } } },
+      }),
+      prisma.editorialAction.create({
+        data: { articleId: id, userId: req.user.id, action: 'SCHEDULED', note: `Scheduled for publication at ${date.toISOString()}` },
+      }),
+    ]);
+    res.json({ article: serializeArticle(updated[0]) });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Failed to schedule article.' });
+  }
+});
+
+// ---------------------------------------------------------------------
+// REVISION HISTORY & ONE-CLICK ROLLBACKS
+// ---------------------------------------------------------------------
+app.get('/api/articles/:id/revisions', requireAuth, async (req, res) => {
+  const id = parseInt(req.params.id);
+  if (!id || isNaN(id)) return res.status(400).json({ error: 'Valid numeric article ID is required.' });
+  const article = await prisma.article.findUnique({ where: { id } });
+  if (!article) return res.status(404).json({ error: 'Article not found.' });
+  if (!canEditArticle(req.user, article)) return res.status(403).json({ error: 'Forbidden' });
+
+  const revisions = await prisma.articleRevision.findMany({
+    where: { articleId: id },
+    orderBy: { createdAt: 'desc' },
+    include: { user: { select: { id: true, name: true, role: true, avatar: true } } },
+    take: 30,
+  });
+  res.json({ revisions });
+});
+
+app.post('/api/articles/:id/rollback/:revisionId', requireAuth, async (req, res) => {
+  const id = parseInt(req.params.id);
+  const revId = parseInt(req.params.revisionId);
+  if (!id || !revId) return res.status(400).json({ error: 'Valid article ID and revision ID are required.' });
+
+  const article = await prisma.article.findUnique({ where: { id } });
+  if (!article) return res.status(404).json({ error: 'Article not found.' });
+  if (!canEditArticle(req.user, article)) return res.status(403).json({ error: 'Forbidden' });
+
+  const targetRevision = await prisma.articleRevision.findUnique({ where: { id: revId } });
+  if (!targetRevision || targetRevision.articleId !== id) {
+    return res.status(404).json({ error: 'Target revision not found for this article.' });
+  }
+
+  // Snapshot current state before rolling back
+  await prisma.articleRevision.create({
+    data: {
+      articleId: id,
+      userId: req.user.id,
+      title: article.title,
+      excerpt: article.excerpt,
+      content: article.content,
+    },
+  }).catch((e) => console.warn('[REVISION SNAPSHOT] Warning:', e.message));
+
+  const updated = await prisma.article.update({
+    where: { id },
+    data: {
+      title: targetRevision.title,
+      excerpt: targetRevision.excerpt,
+      content: targetRevision.content,
+    },
+    include: { author: true, category: true, tags: { include: { tag: true } } },
+  });
+
+  await prisma.editorialAction.create({
+    data: {
+      articleId: id,
+      userId: req.user.id,
+      action: 'ROLLBACK',
+      note: `Rolled back to revision snapshot #${revId} from ${targetRevision.createdAt.toISOString()}`,
+    },
+  });
+
+  res.json({ article: serializeArticle(updated), message: `Restored to revision #${revId}` });
+});
+
+// ---------------------------------------------------------------------
+// COLLABORATIVE EDITORIAL NOTES & INLINE FEEDBACK
+// ---------------------------------------------------------------------
+app.get('/api/articles/:id/notes', requireAuth, async (req, res) => {
+  const id = parseInt(req.params.id);
+  if (!id || isNaN(id)) return res.status(400).json({ error: 'Valid article ID required.' });
+  const article = await prisma.article.findUnique({ where: { id } });
+  if (!article) return res.status(404).json({ error: 'Article not found.' });
+  if (!canEditArticle(req.user, article)) return res.status(403).json({ error: 'Forbidden' });
+
+  const notes = await prisma.editorialComment.findMany({
+    where: { articleId: id },
+    orderBy: { createdAt: 'desc' },
+    include: { user: { select: { id: true, name: true, role: true, avatar: true } } },
+  });
+  res.json({ notes });
+});
+
+app.post('/api/articles/:id/notes', requireAuth, async (req, res) => {
+  const id = parseInt(req.params.id);
+  const { content } = req.body || {};
+  if (!id || !content?.trim()) return res.status(400).json({ error: 'Note content is required.' });
+
+  const article = await prisma.article.findUnique({ where: { id } });
+  if (!article) return res.status(404).json({ error: 'Article not found.' });
+  if (!canEditArticle(req.user, article)) return res.status(403).json({ error: 'Forbidden' });
+
+  const note = await prisma.editorialComment.create({
+    data: {
+      articleId: id,
+      userId: req.user.id,
+      content: content.trim(),
+    },
+    include: { user: { select: { id: true, name: true, role: true, avatar: true } } },
+  });
+  res.status(201).json({ note });
+});
+
+app.patch('/api/articles/:id/notes/:noteId/resolve', requireAuth, async (req, res) => {
+  const id = parseInt(req.params.id);
+  const noteId = parseInt(req.params.noteId);
+  const note = await prisma.editorialComment.findUnique({ where: { id: noteId } });
+  if (!note || note.articleId !== id) return res.status(404).json({ error: 'Note not found.' });
+
+  const updated = await prisma.editorialComment.update({
+    where: { id: noteId },
+    data: { resolved: !note.resolved },
+    include: { user: { select: { id: true, name: true, role: true, avatar: true } } },
+  });
+  res.json({ note: updated });
+});
+
+app.delete('/api/articles/:id/notes/:noteId', requireAuth, async (req, res) => {
+  const id = parseInt(req.params.id);
+  const noteId = parseInt(req.params.noteId);
+  const note = await prisma.editorialComment.findUnique({ where: { id: noteId } });
+  if (!note || note.articleId !== id) return res.status(404).json({ error: 'Note not found.' });
+  if (note.userId !== req.user.id && !isStaff(req.user)) return res.status(403).json({ error: 'Forbidden.' });
+
+  await prisma.editorialComment.delete({ where: { id: noteId } });
+  res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------
+// LIVE-BLOGGING & DEVELOPING STORY DISPATCHES
+// ---------------------------------------------------------------------
+app.post('/api/articles/:id/toggle-live', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
+  const id = parseInt(req.params.id);
+  const article = await prisma.article.findUnique({ where: { id } });
+  if (!article) return res.status(404).json({ error: 'Article not found.' });
+
+  const updated = await prisma.article.update({
+    where: { id },
+    data: { isLive: !article.isLive },
+  });
+  res.json({ isLive: updated.isLive });
+});
+
+app.get('/api/articles/:id/live-updates', async (req, res) => {
+  const id = parseInt(req.params.id);
+  if (!id) return res.status(400).json({ error: 'Valid article ID required.' });
+  const updates = await prisma.liveUpdate.findMany({
+    where: { articleId: id },
+    orderBy: [{ isPinned: 'desc' }, { publishedAt: 'desc' }],
+    include: { author: { select: { id: true, name: true, role: true, avatar: true } } },
+  });
+  res.json({ updates });
+});
+
+app.post('/api/articles/:id/live-updates', requireAuth, requireRole('ADMIN', 'EDITOR', 'REPORTER'), async (req, res) => {
+  const id = parseInt(req.params.id);
+  const { title, content, isPinned } = req.body || {};
+  if (!id || !content?.trim()) return res.status(400).json({ error: 'Update content is required.' });
+
+  const article = await prisma.article.findUnique({ where: { id } });
+  if (!article) return res.status(404).json({ error: 'Article not found.' });
+  if (!canEditArticle(req.user, article)) return res.status(403).json({ error: 'Forbidden' });
+
+  const update = await prisma.liveUpdate.create({
+    data: {
+      articleId: id,
+      authorId: req.user.id,
+      title: title?.trim() || null,
+      content: sanitize(content),
+      isPinned: isStaff(req.user) ? !!isPinned : false,
+      publishedAt: new Date(),
+    },
+    include: { author: { select: { id: true, name: true, role: true, avatar: true } } },
+  });
+  res.status(201).json({ update });
+});
+
+app.delete('/api/articles/:id/live-updates/:updateId', requireAuth, async (req, res) => {
+  const id = parseInt(req.params.id);
+  const updateId = parseInt(req.params.updateId);
+  const update = await prisma.liveUpdate.findUnique({ where: { id: updateId } });
+  if (!update || update.articleId !== id) return res.status(404).json({ error: 'Update not found.' });
+  if (update.authorId !== req.user.id && !isStaff(req.user)) return res.status(403).json({ error: 'Forbidden' });
+
+  await prisma.liveUpdate.delete({ where: { id: updateId } });
+  res.json({ ok: true });
+});
+
+app.get('/api/live/ticker', async (req, res) => {
+  const [liveArticles, breakingArticles] = await Promise.all([
+    prisma.article.findMany({
+      where: { isLive: true, status: 'PUBLISHED' },
+      select: { id: true, title: true, slug: true, updatedAt: true },
+      take: 5,
+    }),
+    prisma.article.findMany({
+      where: { isBreaking: true, status: 'PUBLISHED' },
+      select: { id: true, title: true, slug: true, updatedAt: true },
+      take: 5,
+    }),
+  ]);
+  res.json({ liveArticles, breakingArticles });
+});
+
+// ---------------------------------------------------------------------
+// REAL-TIME ANALYTICS, READER HEATMAP & TRENDING
+// ---------------------------------------------------------------------
+app.post('/api/analytics/read-progress', async (req, res) => {
+  let { articleId, milestone } = req.body || {};
+  if (!articleId && req.headers['content-type']?.includes('text/plain')) {
+    try {
+      const parsed = JSON.parse(req.body);
+      articleId = parsed.articleId;
+      milestone = parsed.milestone;
+    } catch {}
+  }
+  const id = parseInt(articleId);
+  const m = parseInt(milestone);
+  if (!id || ![25, 50, 75, 100].includes(m)) {
+    return res.status(400).json({ error: 'Valid articleId and milestone (25, 50, 75, 100) required.' });
+  }
+
+  await prisma.articleReadingStat.create({
+    data: { articleId: id, milestone: m },
+  }).catch(() => {});
+
+  res.json({ ok: true });
+});
+
+app.get('/api/articles/:id/reading-heatmap', requireAuth, async (req, res) => {
+  const id = parseInt(req.params.id);
+  if (!id) return res.status(400).json({ error: 'Valid article ID required.' });
+  const article = await prisma.article.findUnique({ where: { id }, select: { views: true } });
+  if (!article) return res.status(404).json({ error: 'Article not found.' });
+
+  const stats = await prisma.articleReadingStat.groupBy({
+    by: ['milestone'],
+    where: { articleId: id },
+    _count: { milestone: true },
+  });
+
+  const counts = { 25: 0, 50: 0, 75: 0, 100: 0 };
+  stats.forEach((s) => { counts[s.milestone] = s._count.milestone; });
+  const totalViews = Math.max(article.views, 1);
+  const percentages = {
+    25: Math.min(100, Math.round((counts[25] / totalViews) * 100)),
+    50: Math.min(100, Math.round((counts[50] / totalViews) * 100)),
+    75: Math.min(100, Math.round((counts[75] / totalViews) * 100)),
+    100: Math.min(100, Math.round((counts[100] / totalViews) * 100)),
+  };
+
+  res.json({ totalViews: article.views, counts, percentages });
+});
+
+app.get('/api/articles/trending', async (req, res) => {
+  const items = await prisma.article.findMany({
+    where: {
+      status: 'PUBLISHED',
+      publishedAt: { gte: new Date(Date.now() - 48 * 60 * 60 * 1000) },
+    },
+    orderBy: { views: 'desc' },
+    take: 6,
+    include: { author: true, category: true, tags: { include: { tag: true } } },
+  });
+  res.json({ items: items.map(serializeArticle) });
+});
+
+// ---------------------------------------------------------------------
+// NATIVE SPONSORED CONTENT & AD SPACES
+// ---------------------------------------------------------------------
+app.get('/api/ads', async (req, res) => {
+  const placement = req.query.placement;
+  const now = new Date();
+  const where = {
+    active: true,
+    OR: [{ startDate: null }, { startDate: { lte: now } }],
+    AND: [{ OR: [{ endDate: null }, { endDate: { gte: now } }] }],
+  };
+  if (placement) where.placement = placement;
+
+  const ads = await prisma.ad.findMany({
+    where,
+    orderBy: { impressions: 'asc' }, // balanced rotation
+    take: 5,
+  });
+  res.json({ items: ads });
+});
+
+app.post('/api/ads/:id/impression', async (req, res) => {
+  const id = parseInt(req.params.id);
+  if (!id) return res.status(400).json({ error: 'Invalid ID' });
+  await prisma.ad.update({ where: { id }, data: { impressions: { increment: 1 } } }).catch(() => {});
+  res.json({ ok: true });
+});
+
+app.post('/api/ads/:id/click', async (req, res) => {
+  const id = parseInt(req.params.id);
+  if (!id) return res.status(400).json({ error: 'Invalid ID' });
+  await prisma.ad.update({ where: { id }, data: { clicks: { increment: 1 } } }).catch(() => {});
+  res.json({ ok: true });
+});
+
+app.get('/api/admin/ads', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
+  const ads = await prisma.ad.findMany({ orderBy: { createdAt: 'desc' } });
+  res.json({ items: ads });
+});
+
+app.post('/api/admin/ads', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  const { title, sponsorName, placement, imageUrl, targetUrl, active, startDate, endDate } = req.body || {};
+  if (!title || !sponsorName || !placement || !imageUrl || !targetUrl) {
+    return res.status(400).json({ error: 'Title, sponsor name, placement, image URL and target URL are required.' });
+  }
+
+  const ad = await prisma.ad.create({
+    data: {
+      title,
+      sponsorName,
+      placement,
+      imageUrl,
+      targetUrl,
+      active: active !== undefined ? !!active : true,
+      startDate: startDate ? new Date(startDate) : null,
+      endDate: endDate ? new Date(endDate) : null,
+    },
+  });
+  res.status(201).json({ ad });
+});
+
+app.put('/api/admin/ads/:id', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  const id = parseInt(req.params.id);
+  const { title, sponsorName, placement, imageUrl, targetUrl, active, startDate, endDate } = req.body || {};
+  const data = {};
+  if (title !== undefined) data.title = title;
+  if (sponsorName !== undefined) data.sponsorName = sponsorName;
+  if (placement !== undefined) data.placement = placement;
+  if (imageUrl !== undefined) data.imageUrl = imageUrl;
+  if (targetUrl !== undefined) data.targetUrl = targetUrl;
+  if (active !== undefined) data.active = !!active;
+  if (startDate !== undefined) data.startDate = startDate ? new Date(startDate) : null;
+  if (endDate !== undefined) data.endDate = endDate ? new Date(endDate) : null;
+
+  const ad = await prisma.ad.update({ where: { id }, data });
+  res.json({ ad });
+});
+
+app.delete('/api/admin/ads/:id', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  const id = parseInt(req.params.id);
+  await prisma.ad.delete({ where: { id } });
+  res.json({ ok: true });
+});
 
 // ---------------------------------------------------------------------
 // AUTHORS (public)
@@ -1409,6 +1814,207 @@ app.post('/api/aggregator/batch-dismiss', requireAuth, requireRole('ADMIN', 'EDI
   res.json({ success: true, count: cleanIds.length });
 });
 
+// POST /api/aggregator/corroborate — Cross-examine and synthesize 2+ stories into a unified deep report
+app.post('/api/aggregator/corroborate', requireAuth, requireRole('ADMIN', 'EDITOR'), async (req, res) => {
+  const logger = require('./newsroom/logger.js');
+  const { corroborateMultiSourceDraft } = require('./newsroom/agent.js');
+  const { ids } = req.body || {};
+  if (!Array.isArray(ids) || ids.length < 2) {
+    return res.status(400).json({ error: 'At least two newsroom item IDs are required for corroboration.' });
+  }
+
+  const items = await prisma.newsroomItem.findMany({
+    where: { id: { in: ids.map((n) => parseInt(n, 10)).filter(Boolean) } },
+  });
+
+  if (items.length < 2) {
+    return res.status(400).json({ error: 'Could not find at least two valid newsroom items for given IDs.' });
+  }
+
+  try {
+    const result = await corroborateMultiSourceDraft(items, req.user, prisma);
+    res.json({
+      success: true,
+      message: `Successfully synthesized and corroborated ${items.length} source reports.`,
+      article: serializeArticle(result.article),
+      corroboration: result.corroboration,
+    });
+  } catch (err) {
+    logger.error(`[CORROBORATION] Error synthesizing sources: ${err.message}`);
+    res.status(500).json({ error: `Corroboration failed: ${err.message}` });
+  }
+});
+
+// ---------------------------------------------------------------------
+// DATABASE INITIALIZATION & BACKGROUND SCHEDULER
+// Ensures all enterprise tables & columns exist in Neon PostgreSQL
+// on boot (Render free tier friendly — zero manual CLI migration needed)
+// ---------------------------------------------------------------------
+async function initDatabaseTables() {
+  try {
+    // 1. Enum value for SCHEDULED
+    await prisma.$executeRawUnsafe(`
+      DO $$ BEGIN
+        ALTER TYPE "ArticleStatus" ADD VALUE IF NOT EXISTS 'SCHEDULED';
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+    `).catch(() => {});
+
+    // 2. Article table columns
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Article" ADD COLUMN IF NOT EXISTS "scheduled_publish_at" TIMESTAMPTZ;`).catch(() => {});
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Article" ADD COLUMN IF NOT EXISTS "is_live" BOOLEAN NOT NULL DEFAULT FALSE;`).catch(() => {});
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS idx_article_scheduled ON "Article"("scheduled_publish_at");`).catch(() => {});
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS idx_article_live ON "Article"("is_live");`).catch(() => {});
+
+    // 3. ads table
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS "ads" (
+        id            SERIAL PRIMARY KEY,
+        title         TEXT NOT NULL,
+        sponsor_name  TEXT NOT NULL,
+        placement     TEXT NOT NULL,
+        image_url     TEXT NOT NULL,
+        target_url    TEXT NOT NULL,
+        active        BOOLEAN NOT NULL DEFAULT TRUE,
+        impressions   INTEGER NOT NULL DEFAULT 0,
+        clicks        INTEGER NOT NULL DEFAULT 0,
+        start_date    TIMESTAMPTZ,
+        end_date      TIMESTAMPTZ,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_ads_placement_active ON "ads"(placement, active);
+    `).catch(() => {});
+
+    // 4. article_revisions table
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS "article_revisions" (
+        id          SERIAL PRIMARY KEY,
+        article_id  INTEGER NOT NULL REFERENCES "Article"(id) ON DELETE CASCADE,
+        user_id     INTEGER NOT NULL REFERENCES "User"(id) ON DELETE CASCADE,
+        title       TEXT NOT NULL,
+        excerpt     TEXT,
+        content     TEXT NOT NULL,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_article_revisions_article ON "article_revisions"(article_id);
+    `).catch(() => {});
+
+    // 5. editorial_comments table
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS "editorial_comments" (
+        id          SERIAL PRIMARY KEY,
+        article_id  INTEGER NOT NULL REFERENCES "Article"(id) ON DELETE CASCADE,
+        user_id     INTEGER NOT NULL REFERENCES "User"(id) ON DELETE CASCADE,
+        content     TEXT NOT NULL,
+        resolved    BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_editorial_comments_article ON "editorial_comments"(article_id);
+    `).catch(() => {});
+
+    // 6. live_updates table
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS "live_updates" (
+        id           SERIAL PRIMARY KEY,
+        article_id   INTEGER NOT NULL REFERENCES "Article"(id) ON DELETE CASCADE,
+        author_id    INTEGER NOT NULL REFERENCES "User"(id) ON DELETE CASCADE,
+        title        TEXT,
+        content      TEXT NOT NULL,
+        is_pinned    BOOLEAN NOT NULL DEFAULT FALSE,
+        published_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_live_updates_article ON "live_updates"(article_id, published_at);
+    `).catch(() => {});
+
+    // 7. article_reading_stats table
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS "article_reading_stats" (
+        id          SERIAL PRIMARY KEY,
+        article_id  INTEGER NOT NULL REFERENCES "Article"(id) ON DELETE CASCADE,
+        milestone   INTEGER NOT NULL,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_reading_stats_article ON "article_reading_stats"(article_id, milestone);
+    `).catch(() => {});
+
+    // 8. Seed default ads if empty
+    const adCount = await prisma.ad.count().catch(() => 0);
+    if (adCount === 0) {
+      await prisma.ad.createMany({
+        data: [
+          {
+            title: 'Empowering Jigawa Agriculture Initiative',
+            sponsorName: 'Jigawa AgriTech',
+            placement: 'HEADER_LEADERBOARD',
+            imageUrl: 'https://images.unsplash.com/photo-1595974482597-4b8da8879bc5?auto=format&fit=crop&w=1200&q=80',
+            targetUrl: 'https://jigawa.gov.ng',
+            active: true,
+          },
+          {
+            title: 'Northern Solar Clean Energy Grant',
+            sponsorName: 'Northern Clean Power',
+            placement: 'IN_ARTICLE',
+            imageUrl: 'https://images.unsplash.com/photo-1509391365360-2e959784a276?auto=format&fit=crop&w=1000&q=80',
+            targetUrl: 'https://jigawa.gov.ng',
+            active: true,
+          },
+          {
+            title: 'Dutse Digital Hub Training Fellowship',
+            sponsorName: 'Dutse Tech Academy',
+            placement: 'SIDEBAR_STICKY',
+            imageUrl: 'https://images.unsplash.com/photo-1531482615713-2afd69097998?auto=format&fit=crop&w=800&q=80',
+            targetUrl: 'https://jigawa.gov.ng',
+            active: true,
+          },
+        ]
+      }).catch(() => {});
+    }
+    console.log('[DB] Enterprise tables and columns verified.');
+  } catch (err) {
+    console.warn('[DB] initDatabaseTables non-fatal notice:', err.message);
+  }
+}
+
+// Background Scheduled Publishing Runner (checks every 60 seconds)
+function startScheduledPublishingRunner() {
+  setInterval(async () => {
+    try {
+      const now = new Date();
+      const dueArticles = await prisma.article.findMany({
+        where: {
+          status: 'SCHEDULED',
+          scheduledPublishAt: { lte: now },
+        },
+      });
+
+      for (const article of dueArticles) {
+        await prisma.$transaction([
+          prisma.article.update({
+            where: { id: article.id },
+            data: {
+              status: 'PUBLISHED',
+              publishedAt: article.scheduledPublishAt || now,
+            },
+          }),
+          prisma.editorialAction.create({
+            data: {
+              articleId: article.id,
+              userId: article.authorId,
+              action: 'PUBLISHED',
+              note: `Automatically published at scheduled time (${now.toISOString()})`,
+            },
+          }),
+        ]);
+        console.log(`[SCHEDULED PUBLISHER] Published scheduled article #${article.id}: "${article.title}"`);
+      }
+    } catch (err) {
+      console.warn('[SCHEDULED PUBLISHER] Poll warning:', err.message);
+    }
+  }, 60000);
+}
+
 // ---------------------------------------------------------------------
 // Static frontend (single Render Web Service serves the Vue build)
 // ---------------------------------------------------------------------
@@ -1425,8 +2031,10 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Jigawa Times server listening on port ${PORT} [${NODE_ENV}]`);
+  await initDatabaseTables();
+  startScheduledPublishingRunner();
   // Start the AI Newsroom scheduler (no-op if NEWSROOM_INTERVAL_MINUTES is 0 or not set)
   if (newsroom) {
     newsroom.startScheduler();

@@ -2819,4 +2819,343 @@ td.td-title a:hover { color: var(--brand); text-decoration: underline; }
   background: #059669 !important;
 }
 
+/* ==========================================================================
+   ENTERPRISE SUITE: PROGRESS BAR, ADS, LIVE TICKER, LIVE BLOG, MODALS
+   ========================================================================== */
+
+/* 1. Article Reading Progress Bar */
+.reading-progress-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--accent) 0%, #10b981 100%);
+  z-index: 99999;
+  transition: width 0.1s ease-out;
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.4);
+}
+
+/* 2. Native Sponsored Ads */
+.native-ad-container {
+  background: var(--bg-card);
+  border: 1px solid var(--line-1);
+  border-radius: var(--r-md);
+  padding: 10px 14px;
+  margin: 18px 0;
+  box-shadow: var(--shadow-sm);
+  transition: all 0.2s ease;
+}
+.native-ad-container:hover {
+  box-shadow: var(--shadow-md);
+  border-color: var(--line-2);
+}
+.native-ad-container.ad-header-leaderboard {
+  max-width: 980px;
+  margin: 12px auto;
+  border-left: 4px solid #f59e0b;
+}
+.native-ad-container.ad-in-article {
+  background: #fafafa;
+  border-left: 4px solid var(--accent);
+  margin: 28px 0;
+}
+.native-ad-container.ad-sidebar-sticky {
+  position: sticky;
+  top: 80px;
+  border-top: 3px solid #6366f1;
+}
+.ad-label-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.ad-badge {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  background: #f1f5f9;
+  color: #475569;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+.ad-sponsor {
+  font-size: 11px;
+  color: #64748b;
+  font-weight: 500;
+}
+.ad-content-box {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
+}
+.ad-image-wrap {
+  width: 90px;
+  height: 58px;
+  border-radius: 6px;
+  overflow: hidden;
+  flex-shrink: 0;
+  border: 1px solid var(--line-2);
+}
+.ad-image-wrap img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 0.3s ease;
+}
+.ad-content-box:hover .ad-image-wrap img {
+  transform: scale(1.05);
+}
+.ad-info {
+  flex: 1;
+}
+.ad-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--ink-1);
+  line-height: 1.35;
+  margin-bottom: 4px;
+}
+.ad-cta {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 3. Global Live / Breaking Ticker */
+.live-ticker-strip {
+  background: #0f172a;
+  color: #f8fafc;
+  padding: 8px 0;
+  border-bottom: 1px solid #1e293b;
+  font-size: 0.88rem;
+}
+.live-ticker-inner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+.live-ticker-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.live-ticker-badge.is-live-pulse {
+  background: #dc2626;
+  color: #ffffff;
+}
+.live-ticker-badge.is-breaking {
+  background: #d97706;
+  color: #ffffff;
+}
+.pulse-dot {
+  width: 7px;
+  height: 7px;
+  background: #ffffff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.4);
+  animation: pulse 1.5s infinite;
+}
+.live-ticker-headline {
+  flex: 1;
+  color: #f1f5f9;
+  text-decoration: none;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: color 0.15s ease;
+}
+.live-ticker-headline:hover {
+  color: #38bdf8;
+  text-decoration: underline;
+}
+.live-ticker-action {
+  font-size: 0.8rem;
+  color: #94a3b8;
+  white-space: nowrap;
+  font-weight: 600;
+  text-decoration: none;
+}
+.live-ticker-action:hover {
+  color: #fff;
+}
+
+/* 4. Live-Blogging & Developing Story Header */
+.live-blog-pulse-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #fef2f2;
+  border: 1px solid #fee2e2;
+  border-left: 5px solid #dc2626;
+  padding: 12px 18px;
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+  margin: 16px auto;
+  box-shadow: 0 2px 6px rgba(220, 38, 38, 0.08);
+}
+.live-pulse-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #b91c1c;
+  font-size: 0.88rem;
+  letter-spacing: 0.03em;
+}
+.pulse-beacon {
+  width: 10px;
+  height: 10px;
+  background: #dc2626;
+  border-radius: 50%;
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.3);
+  animation: pulse 1.2s infinite;
+}
+.live-stream-auto-hint {
+  font-size: 0.8rem;
+  color: #7f1d1d;
+  font-weight: 500;
+}
+.live-pill-tag {
+  background: #dc2626;
+  color: #ffffff;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Live Blog Timeline Feed */
+.live-updates-container {
+  margin: 20px 0 30px 0;
+  padding: 18px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: var(--r-md);
+}
+.live-feed-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 800;
+  font-size: 1.05rem;
+  color: #0f172a;
+  margin-bottom: 16px;
+  border-bottom: 2px solid #e2e8f0;
+  padding-bottom: 8px;
+}
+.live-poster-card {
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 14px;
+  margin-bottom: 18px;
+  box-shadow: var(--shadow-sm);
+}
+.live-poster-card h4 {
+  font-size: 0.9rem;
+  font-weight: 700;
+  margin: 0 0 10px 0;
+  color: #1e293b;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.live-updates-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  position: relative;
+  padding-left: 12px;
+  border-left: 2px solid #cbd5e1;
+}
+.live-update-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 14px 16px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  position: relative;
+}
+.live-update-card.is-pinned-card {
+  border-color: #f59e0b;
+  background: #fffbeb;
+  box-shadow: 0 2px 8px rgba(245, 158, 11, 0.12);
+}
+.update-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 0.82rem;
+}
+.update-time-badge {
+  font-weight: 700;
+  color: #0284c7;
+  display: inline-flex;
+  align-items: center;
+}
+.update-author {
+  color: #64748b;
+  font-size: 0.8rem;
+}
+.update-headline {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #0f172a;
+  margin: 0 0 6px 0;
+}
+.update-body {
+  font-size: 0.92rem;
+  color: #334155;
+  line-height: 1.55;
+}
+
+/* 5. Custom Modal Overlays */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(15, 23, 42, 0.65);
+  backdrop-filter: blur(4px);
+  z-index: 99990;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+.modal-card {
+  background: #ffffff;
+  border-radius: 12px;
+  box-shadow: 0 20px 40px -10px rgba(0, 0, 0, 0.3);
+  border: 1px solid #e2e8f0;
+  overflow: hidden;
+  animation: fadeIn 0.15s ease-out;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+
 

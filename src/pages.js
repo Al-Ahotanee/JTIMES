@@ -6,7 +6,7 @@ import { notify, confirmDialog } from './notifications.js';
 import {
   ArticleCard, ArticleListRow, Pagination,
   ShareButtons, CommentsBlock, ImageUploader, NewsletterBox,
-  DashSidebar, DashTopbar,
+  DashSidebar, DashTopbar, AdBanner, LiveTicker,
   timeAgo, readingTime,
 } from './components.js';
 
@@ -71,19 +71,21 @@ export const Home = defineComponent({
     const buji      = ref([]);
     const jigawa    = ref([]);
     const politics  = ref([]);
+    const trending  = ref([]);
     const spotlight = ref(null);
     const loading   = ref(true);
     const error     = ref(false);
 
     onMounted(async () => {
       try {
-        const [f, l, m, b, j, p] = await Promise.all([
+        const [f, l, m, b, j, p, tr] = await Promise.all([
           api.get('/api/articles?featured=true&pageSize=6').catch(() => ({ items: [] })),
           api.get('/api/articles?pageSize=12').catch(() => ({ items: [] })),
           api.get('/api/articles/most-read?window=week').catch(() => ({ items: [] })),
           api.get('/api/articles?category=buji&pageSize=3').catch(() => ({ items: [] })),
           api.get('/api/articles?category=jigawa&pageSize=3').catch(() => ({ items: [] })),
           api.get('/api/articles?category=politics&pageSize=3').catch(() => ({ items: [] })),
+          api.get('/api/articles/trending').catch(() => ({ items: [] })),
         ]);
         featured.value  = f.items || [];
         latest.value    = l.items || [];
@@ -91,6 +93,7 @@ export const Home = defineComponent({
         buji.value      = b.items || [];
         jigawa.value    = j.items || [];
         politics.value  = p.items || [];
+        trending.value  = tr.items || [];
         
         // Pick an investigative / deep dive spotlight story if available
         spotlight.value = featured.value.find(a => a.category?.slug === 'investigations') || featured.value[1] || latest.value[1];
@@ -107,7 +110,7 @@ export const Home = defineComponent({
       return pool.filter(a => a.id !== hero.value?.id).slice(0, 4);
     });
 
-    return { featured, latest, mostRead, buji, jigawa, politics, spotlight, loading, error, hero, heroSide, timeAgo, readingTime };
+    return { featured, latest, mostRead, buji, jigawa, politics, trending, spotlight, loading, error, hero, heroSide, timeAgo, readingTime };
   },
   template: `
     <!-- Loading -->
@@ -128,6 +131,35 @@ export const Home = defineComponent({
 
     <!-- Main Content -->
     <div v-else class="nyt-home">
+      <!-- Live Breaking / Developing Ticker -->
+      <live-ticker></live-ticker>
+
+      <!-- Top Leaderboard Ad -->
+      <div class="container" style="margin-top:14px;margin-bottom:6px;">
+        <ad-banner placement="HEADER_LEADERBOARD"></ad-banner>
+      </div>
+
+      <!-- ════ TRENDING STORIES RAIL ════ -->
+      <section class="container" v-if="trending.length" style="margin:16px auto 24px auto;padding:14px 18px;background:#f8fafc;border-radius:var(--r-md);border:1px solid #e2e8f0;">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;font-family:var(--font-sans);font-weight:700;font-size:0.92rem;color:#0f172a;">
+          <i class="fa-solid fa-arrow-trend-up" style="color:var(--accent);"></i>
+          <span>Hourly Trending Stories</span>
+          <span style="font-size:0.75rem;font-weight:normal;color:#64748b;margin-left:auto;"><i class="fa-solid fa-bolt" style="color:#eab308;"></i> Live Reader Engagement</span>
+        </div>
+        <div class="trending-stories-rail" style="display:grid;grid-template-columns:repeat(auto-fit, minmax(260px, 1fr));gap:14px;">
+          <div v-for="(t, idx) in trending.slice(0, 4)" :key="t.id" style="display:flex;gap:10px;align-items:flex-start;">
+            <span style="font-size:1.5rem;font-weight:800;color:#cbd5e1;line-height:1;min-width:22px;">0{{ idx + 1 }}</span>
+            <div>
+              <router-link :to="'/news/' + t.slug" style="font-weight:600;font-size:0.88rem;color:var(--ink-1);line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">
+                {{ t.title }}
+              </router-link>
+              <div style="font-size:0.75rem;color:#64748b;margin-top:3px;">
+                <span style="color:var(--accent);font-weight:600;">{{ t.category?.name }}</span> &bull; {{ timeAgo(t.publishedAt) }}
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
 
       <!-- ════ HERO BROADSHEET ════ -->
       <div class="container nyt-hero">
@@ -248,20 +280,57 @@ export const Home = defineComponent({
       </section>
     </div>
   `,
-  components: { ArticleCard, ArticleListRow, NewsletterBox },
+  components: { ArticleCard, ArticleListRow, NewsletterBox, AdBanner, LiveTicker },
 });
 
 // ARTICLE PAGE (The Athletic Broadsheet Reading View)
 export const ArticlePage = defineComponent({
   setup() {
-    const route   = useRoute();
-    const article = ref(null);
-    const related = ref([]);
-    const mostRead = ref([]);
-    const error   = ref(false);
+    const route       = useRoute();
+    const article     = ref(null);
+    const related     = ref([]);
+    const mostRead    = ref([]);
+    const error       = ref(false);
+    const scrollPercent = ref(0);
+    const liveUpdates = ref([]);
+    const liveLoading = ref(false);
+    const postingUpdate = ref(false);
+    const newUpdate   = reactive({ title: '', content: '', isPinned: false });
+    const sentMilestones = new Set();
+    let pollTimer     = null;
+
+    const fetchLiveUpdates = async (artId) => {
+      if (!artId) return;
+      try {
+        const res = await api.get(`/api/articles/${artId}/live-updates`);
+        liveUpdates.value = res.updates || [];
+      } catch {}
+    };
+
+    const handleScroll = () => {
+      const scrollHeight = document.documentElement.scrollHeight - window.innerHeight;
+      if (scrollHeight <= 0) return;
+      const pct = Math.min(100, Math.max(0, Math.round((window.scrollY / scrollHeight) * 100)));
+      scrollPercent.value = pct;
+
+      if (!article.value?.id) return;
+      [25, 50, 75, 100].forEach((m) => {
+        if (pct >= m && !sentMilestones.has(m)) {
+          sentMilestones.add(m);
+          const beaconData = JSON.stringify({ articleId: article.value.id, milestone: m });
+          if (navigator.sendBeacon) {
+            navigator.sendBeacon('/api/analytics/read-progress', new Blob([beaconData], { type: 'text/plain' }));
+          } else {
+            api.post('/api/analytics/read-progress', { articleId: article.value.id, milestone: m }).catch(() => {});
+          }
+        }
+      });
+    };
 
     const load = async () => {
-      error.value = false; article.value = null;
+      error.value = false; article.value = null; sentMilestones.clear();
+      if (pollTimer) clearInterval(pollTimer);
+
       try {
         const res = await api.get(`/api/articles/${route.params.slug}`);
         article.value = res.article;
@@ -273,14 +342,68 @@ export const ArticlePage = defineComponent({
         ]);
         related.value  = (r.items || []).filter(x => x.slug !== res.article.slug).slice(0, 4);
         mostRead.value = (m.items || []).slice(0, 5);
+
+        if (article.value.isLive) {
+          await fetchLiveUpdates(article.value.id);
+          pollTimer = setInterval(() => fetchLiveUpdates(article.value.id), 30000);
+        }
       } catch { error.value = true; }
     };
-    onMounted(load);
+
+    const postLiveUpdate = async () => {
+      if (!newUpdate.content.trim() || !article.value?.id) return;
+      postingUpdate.value = true;
+      try {
+        await api.post(`/api/articles/${article.value.id}/live-updates`, {
+          title: newUpdate.title,
+          content: newUpdate.content,
+          isPinned: newUpdate.isPinned,
+        });
+        newUpdate.title = '';
+        newUpdate.content = '';
+        newUpdate.isPinned = false;
+        await fetchLiveUpdates(article.value.id);
+        notify.success('Live update published.');
+      } catch (e) {
+        notify.error('Failed to post live update: ' + e.message);
+      } finally {
+        postingUpdate.value = false;
+      }
+    };
+
+    const deleteLiveUpdate = async (updateId) => {
+      if (!confirm('Delete this live dispatch?')) return;
+      try {
+        await api.delete(`/api/articles/${article.value.id}/live-updates/${updateId}`);
+        await fetchLiveUpdates(article.value.id);
+        notify.success('Update removed.');
+      } catch (e) {
+        notify.error(e.message);
+      }
+    };
+
+    onMounted(() => {
+      window.addEventListener('scroll', handleScroll, { passive: true });
+      load();
+    });
+
+    onUnmounted(() => {
+      window.removeEventListener('scroll', handleScroll);
+      if (pollTimer) clearInterval(pollTimer);
+    });
+
     watch(() => route.params.slug, load);
 
-    return { article, related, mostRead, error, timeAgo, readingTime };
+    return {
+      article, related, mostRead, error, timeAgo, readingTime,
+      scrollPercent, liveUpdates, newUpdate, postingUpdate,
+      postLiveUpdate, deleteLiveUpdate, store,
+    };
   },
   template: `
+    <!-- Top Scroll Progress Reading Bar -->
+    <div class="reading-progress-bar" :style="{ width: scrollPercent + '%' }" aria-hidden="true"></div>
+
     <div v-if="error" class="state-block container" style="min-height:60vh;display:flex;flex-direction:column;align-items:center;justify-content:center;">
       <div class="state-icon"><i class="fa-solid fa-triangle-exclamation" aria-hidden="true" style="color:var(--accent);"></i></div>
       <h2 style="font-family:var(--font-serif);font-size:2rem;">Report Unavailable</h2>
@@ -289,10 +412,25 @@ export const ArticlePage = defineComponent({
     </div>
 
     <article v-else-if="article" class="athletic-article-view">
+      <!-- Header Leaderboard Ad Banner -->
+      <div class="container" style="margin-top:16px;margin-bottom:8px;">
+        <ad-banner placement="HEADER_LEADERBOARD"></ad-banner>
+      </div>
+
+      <!-- Live-Blogging Pulsing Indicator Banner -->
+      <div v-if="article.isLive" class="container live-blog-pulse-header">
+        <div class="live-pulse-badge">
+          <span class="pulse-beacon"></span>
+          <strong>DEVELOPING STORY &bull; LIVE UPDATES</strong>
+        </div>
+        <span class="live-stream-auto-hint"><i class="fa-solid fa-arrows-rotate fa-spin" style="animation-duration:3s;"></i> Feed updates automatically</span>
+      </div>
+
       <!-- Article Header -->
       <div class="container article-head athletic-article-head">
         <div class="eyebrow-row" style="margin-bottom:var(--s4);">
           <span class="cat-pill"><router-link :to="'/category/'+article.category?.slug" style="color:inherit;">{{ article.category?.name }}</router-link></span>
+          <span v-if="article.isLive" class="live-pill-tag"><i class="fa-solid fa-tower-broadcast"></i> LIVE</span>
           <span class="read-chip"><i class="fa-solid fa-book-open" aria-hidden="true"></i> {{ readingTime(article.content) }} min read</span>
         </div>
         <h1>{{ article.title }}</h1>
@@ -325,7 +463,57 @@ export const ArticlePage = defineComponent({
       <div class="container article-body-wrap athletic-article-layout">
         <!-- Main Reading Column -->
         <div class="article-col">
+          <!-- Live Updates Feed Section (if Live Blog enabled) -->
+          <div v-if="article.isLive" class="live-updates-container">
+            <div class="live-feed-title">
+              <i class="fa-solid fa-rss" style="color:#ef4444;"></i>
+              <span>Live Dispatches Timeline ({{ liveUpdates.length }})</span>
+            </div>
+
+            <!-- Inline Live Update Publisher for Editors -->
+            <div v-if="store.isStaff()" class="live-poster-card">
+              <h4><i class="fa-solid fa-bullhorn"></i> Post Instant Live Dispatch</h4>
+              <input v-model="newUpdate.title" placeholder="Optional dispatch headline..." class="form-input" style="margin-bottom:8px;" />
+              <textarea v-model="newUpdate.content" placeholder="Write live micro-update..." rows="3" class="form-input" style="margin-bottom:8px;"></textarea>
+              <div style="display:flex;justify-content:space-between;align-items:center;">
+                <label style="display:flex;align-items:center;gap:6px;font-size:0.85rem;cursor:pointer;">
+                  <input type="checkbox" v-model="newUpdate.isPinned" /> Pin to Top of Live Stream
+                </label>
+                <button class="btn btn-sm accent" :disabled="postingUpdate || !newUpdate.content.trim()" @click="postLiveUpdate">
+                  <i class="fa-solid fa-paper-plane"></i> {{ postingUpdate ? 'Publishing...' : 'Dispatch Live' }}
+                </button>
+              </div>
+            </div>
+
+            <!-- Live updates timeline stream -->
+            <div v-if="liveUpdates.length" class="live-updates-timeline">
+              <div v-for="u in liveUpdates" :key="u.id" class="live-update-card" :class="{ 'is-pinned-card': u.isPinned }">
+                <div class="update-header">
+                  <div class="update-time-badge">
+                    <i class="fa-solid fa-thumbtack" v-if="u.isPinned" style="color:#eab308;margin-right:4px;"></i>
+                    <i class="fa-regular fa-clock" v-else style="margin-right:4px;"></i>
+                    {{ new Date(u.publishedAt).toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }) }}
+                  </div>
+                  <span class="update-author" v-if="u.author?.name">&bull; {{ u.author.name }}</span>
+                  <button v-if="store.isStaff()" class="btn ghost btn-xs text-danger" style="margin-left:auto;padding:2px 6px;" @click="deleteLiveUpdate(u.id)">
+                    <i class="fa-solid fa-trash-can"></i>
+                  </button>
+                </div>
+                <h4 v-if="u.title" class="update-headline">{{ u.title }}</h4>
+                <div class="update-body" v-html="u.content"></div>
+              </div>
+            </div>
+            <div v-else style="padding:16px;background:#f8fafc;border-radius:var(--r-md);color:#64748b;font-style:italic;font-size:0.9rem;">
+              Live coverage underway. Live dispatches will appear here shortly.
+            </div>
+          </div>
+
           <div class="article-body athletic-prose" v-html="article.content"></div>
+
+          <!-- Mid-Article / In-Article Native Banner Ad -->
+          <div style="margin:28px 0;">
+            <ad-banner placement="IN_ARTICLE"></ad-banner>
+          </div>
 
           <div class="tags-row" v-if="article.tags?.length" aria-label="Article tags">
             <span class="tags-label"><i class="fa-solid fa-tags" aria-hidden="true"></i> Topics:</span>
@@ -340,6 +528,11 @@ export const ArticlePage = defineComponent({
 
         <!-- Sidebar -->
         <aside class="article-aside athletic-aside" aria-label="Related content">
+          <!-- Sticky Sidebar Native Ad -->
+          <div style="margin-bottom:24px;">
+            <ad-banner placement="SIDEBAR_STICKY"></ad-banner>
+          </div>
+
           <div class="sidebar-block athletic-sidebar-block" v-if="mostRead.length">
             <div class="sidebar-block-title"><i class="fa-solid fa-fire" aria-hidden="true" style="color:var(--accent);"></i> Most Read</div>
             <article-list-row v-for="(a, i) in mostRead" :key="a.id" :article="a" :rank="i+1" />
@@ -361,7 +554,7 @@ export const ArticlePage = defineComponent({
       <p>Loading report…</p>
     </div>
   `,
-  components: { ArticleListRow, ShareButtons, CommentsBlock, NewsletterBox },
+  components: { ArticleListRow, ShareButtons, CommentsBlock, NewsletterBox, AdBanner },
 });
 
 // CATEGORY PAGE
@@ -2280,6 +2473,29 @@ export const AdminAggregator = defineComponent({
       }
     };
 
+    const corroborating = ref(false);
+    const corroborateSelected = async () => {
+      if (selectedIds.value.length < 2) {
+        notify.warn('Select Multiple Stories', 'Please select at least 2 source stories covering the same topic to corroborate.');
+        return;
+      }
+      corroborating.value = true;
+      try {
+        const res = await api.post('/api/aggregator/corroborate', { ids: selectedIds.value });
+        notify.success('Corroboration Complete', res.message || 'Merged story drafted successfully!');
+        selectedIds.value = [];
+        await fetchStats();
+        await fetchItems();
+        if (res.article?.id) {
+          router.push(`/reporter/edit/${res.article.id}`);
+        }
+      } catch (e) {
+        notify.error('Corroboration Failed', e.message);
+      } finally {
+        corroborating.value = false;
+      }
+    };
+
     const getItemRegion = (it) => {
       if (it.rawData?.region) return it.rawData.region.toLowerCase();
       const cat = (it.category || '').toLowerCase();
@@ -2340,6 +2556,8 @@ export const AdminAggregator = defineComponent({
       loading,
       scanning,
       cleaning,
+      corroborating,
+      corroborateSelected,
       generatingId,
       selectedIds,
       viewMode,
@@ -2550,6 +2768,10 @@ export const AdminAggregator = defineComponent({
             <button class="btn btn-primary btn-sm" @click="batchDraft">
               <i class="fa-solid fa-wand-magic-sparkles"></i>
               <span>Batch Draft with AI ({{ selectedIds.length }})</span>
+            </button>
+            <button v-if="selectedIds.length >= 2" class="btn btn-sm" style="background:#0284c7;color:#fff;" :disabled="corroborating" @click="corroborateSelected">
+              <i :class="corroborating ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-code-merge'"></i>
+              <span>{{ corroborating ? 'Corroborating...' : 'Corroborate & Merge (' + selectedIds.length + ')' }}</span>
             </button>
             <button class="btn ghost btn-sm text-danger" @click="batchDismiss">
               <i class="fa-solid fa-trash-can"></i>
@@ -3096,11 +3318,130 @@ export const ArticleEditor = defineComponent({
     const form   = reactive({
       id: null, title: '', excerpt: '', content: '',
       categoryId: '', featuredImage: '', imageCaption: '',
-      tags: '', isBreaking: false, isFeatured: false, status: 'DRAFT',
+      tags: '', isBreaking: false, isFeatured: false, isLive: false,
+      scheduledPublishAt: null, status: 'DRAFT',
     });
     const error          = ref('');
     const loading        = ref(false);
     const loadingArticle = ref(!isNew.value);
+
+    // Enterprise: Notes, Revisions, Scheduling, Heatmap
+    const notes          = ref([]);
+    const newNoteText    = ref('');
+    const addingNote     = ref(false);
+    const revisions      = ref([]);
+    const showRevisionsModal = ref(false);
+    const selectedRevision = ref(null);
+    const loadingRevisions = ref(false);
+    const showScheduleModal = ref(false);
+    const scheduledDate  = ref('');
+    const scheduling     = ref(false);
+    const heatmap        = ref(null);
+
+    const fetchNotes = async () => {
+      if (!form.id) return;
+      try {
+        const res = await api.get(`/api/articles/${form.id}/notes`);
+        notes.value = res.notes || [];
+      } catch {}
+    };
+
+    const addNote = async () => {
+      if (!newNoteText.value.trim() || !form.id) return;
+      addingNote.value = true;
+      try {
+        await api.post(`/api/articles/${form.id}/notes`, { content: newNoteText.value });
+        newNoteText.value = '';
+        await fetchNotes();
+        notify.success('Editorial note posted.');
+      } catch (e) {
+        notify.error(e.message);
+      } finally {
+        addingNote.value = false;
+      }
+    };
+
+    const toggleResolveNote = async (note) => {
+      try {
+        await api.patch(`/api/articles/${form.id}/notes/${note.id}/resolve`);
+        await fetchNotes();
+      } catch (e) {
+        notify.error(e.message);
+      }
+    };
+
+    const deleteNote = async (noteId) => {
+      try {
+        await api.delete(`/api/articles/${form.id}/notes/${noteId}`);
+        await fetchNotes();
+      } catch (e) {
+        notify.error(e.message);
+      }
+    };
+
+    const fetchRevisions = async () => {
+      if (!form.id) return;
+      loadingRevisions.value = true;
+      try {
+        const res = await api.get(`/api/articles/${form.id}/revisions`);
+        revisions.value = res.revisions || [];
+        showRevisionsModal.value = true;
+      } catch (e) {
+        notify.error('Could not load revisions: ' + e.message);
+      } finally {
+        loadingRevisions.value = false;
+      }
+    };
+
+    const rollbackToRevision = async (rev) => {
+      if (!confirm(`Rollback to version from ${new Date(rev.createdAt).toLocaleString()}? Current state will be saved as a snapshot.`)) return;
+      try {
+        const res = await api.post(`/api/articles/${form.id}/rollback/${rev.id}`);
+        if (res.article) {
+          form.title = res.article.title;
+          form.excerpt = res.article.excerpt || '';
+          form.content = res.article.content;
+          showRevisionsModal.value = false;
+          notify.success('Restored!', res.message);
+        }
+      } catch (e) {
+        notify.error('Rollback failed: ' + e.message);
+      }
+    };
+
+    const openScheduleModal = () => {
+      const tomorrow = new Date(Date.now() + 24 * 3600 * 1000);
+      tomorrow.setMinutes(0);
+      tomorrow.setSeconds(0);
+      scheduledDate.value = tomorrow.toISOString().slice(0, 16);
+      showScheduleModal.value = true;
+    };
+
+    const schedulePublish = async () => {
+      if (!scheduledDate.value) return;
+      scheduling.value = true;
+      try {
+        const res = await api.post(`/api/articles/${form.id}/schedule`, {
+          scheduledPublishAt: new Date(scheduledDate.value).toISOString(),
+        });
+        form.status = res.article.status;
+        form.scheduledPublishAt = res.article.scheduledPublishAt;
+        showScheduleModal.value = false;
+        notify.success('Publication Scheduled', `Story will automatically go live at ${new Date(scheduledDate.value).toLocaleString('en-NG')} WAT.`);
+      } catch (e) {
+        notify.error('Scheduling failed: ' + e.message);
+      } finally {
+        scheduling.value = false;
+      }
+    };
+
+    const fetchHeatmap = async () => {
+      if (!form.id) return;
+      try {
+        const res = await api.get(`/api/articles/${form.id}/reading-heatmap`);
+        heatmap.value = res;
+      } catch {}
+    };
 
     onMounted(async () => {
       if (!isNew.value) {
@@ -3110,7 +3451,6 @@ export const ArticleEditor = defineComponent({
         }
 
         try {
-          // 1. Fetch the article directly by ID (handles articles by any author for staff)
           const res = await api.get(`/api/articles/by-id/${route.params.id}`);
           if (res?.article) {
             const found = res.article;
@@ -3119,11 +3459,14 @@ export const ArticleEditor = defineComponent({
               content: found.content, categoryId: found.category?.id || '',
               featuredImage: found.featuredImage || '', imageCaption: found.imageCaption || '',
               tags: (found.tags || []).map(t => t.name).join(', '),
-              isBreaking: found.isBreaking, isFeatured: found.isFeatured, status: found.status,
+              isBreaking: found.isBreaking, isFeatured: found.isFeatured,
+              isLive: !!found.isLive, scheduledPublishAt: found.scheduledPublishAt,
+              status: found.status,
             });
+            fetchNotes();
+            fetchHeatmap();
           }
         } catch {
-          // 2. Fallback: check my articles
           try {
             const mine = (await api.get('/api/articles?mine=true&pageSize=100')).items;
             const found = mine?.find(a => String(a.id) === String(route.params.id));
@@ -3133,8 +3476,12 @@ export const ArticleEditor = defineComponent({
                 content: found.content, categoryId: found.category?.id || '',
                 featuredImage: found.featuredImage || '', imageCaption: found.imageCaption || '',
                 tags: (found.tags || []).map(t => t.name).join(', '),
-                isBreaking: found.isBreaking, isFeatured: found.isFeatured, status: found.status,
+                isBreaking: found.isBreaking, isFeatured: found.isFeatured,
+                isLive: !!found.isLive, scheduledPublishAt: found.scheduledPublishAt,
+                status: found.status,
               });
+              fetchNotes();
+              fetchHeatmap();
             }
           } catch {}
         }
@@ -3149,17 +3496,19 @@ export const ArticleEditor = defineComponent({
           title: form.title, excerpt: form.excerpt, content: form.content,
           categoryId: form.categoryId, featuredImage: form.featuredImage,
           imageCaption: form.imageCaption, isBreaking: form.isBreaking,
-          isFeatured: form.isFeatured,
+          isFeatured: form.isFeatured, isLive: form.isLive,
           tags: form.tags.split(',').map(t => t.trim()).filter(Boolean),
         };
         if (isNew.value) {
           const { article } = await api.post('/api/articles', payload);
           form.id = article.id;
           form.status = article.status;
+          notify.success('Story saved!');
           router.push(`/reporter/edit/${article.id}`);
         } else {
           if (!form.id) throw new Error('Cannot update story without a valid ID.');
           await api.put(`/api/articles/${form.id}`, payload);
+          notify.success('Saved', 'Article draft and revision snapshot updated.');
         }
       } catch (e) { error.value = e.message; }
       finally { loading.value = false; }
@@ -3183,7 +3532,10 @@ export const ArticleEditor = defineComponent({
       isNew, form, error, loading, loadingArticle, save, doAction,
       categories: computed(() => store.categories),
       isStaff: computed(() => store.isStaff()),
-      store,
+      notes, newNoteText, addingNote, addNote, toggleResolveNote, deleteNote,
+      revisions, showRevisionsModal, selectedRevision, loadingRevisions, fetchRevisions, rollbackToRevision,
+      showScheduleModal, scheduledDate, scheduling, openScheduleModal, schedulePublish,
+      heatmap, timeAgo, store,
     };
   },
   template: `
@@ -3197,9 +3549,19 @@ export const ArticleEditor = defineComponent({
         <!-- Main form -->
         <div class="editor-main">
           <div class="form-card">
-            <div class="form-card-head">
+            <div class="form-card-head" style="display:flex;justify-content:space-between;align-items:center;">
               <h3><i class="fa-solid fa-pen-to-square" aria-hidden="true" style="margin-right:6px;color:var(--accent);"></i>{{ isNew ? 'Write New Story' : 'Edit Story' }}</h3>
+              
+              <div v-if="!isNew && form.id" style="display:flex;gap:8px;">
+                <button type="button" class="btn ghost btn-sm" @click="fetchRevisions" title="View revision history">
+                  <i class="fa-solid fa-clock-rotate-left"></i> Revisions
+                </button>
+                <router-link v-if="form.status==='PUBLISHED'" :to="'/news/'+form.id" target="_blank" class="btn ghost btn-sm" title="View live page">
+                  <i class="fa-solid fa-arrow-up-right-from-square"></i> Live Page
+                </router-link>
+              </div>
             </div>
+
             <div class="form-card-body">
               <form @submit.prevent="save">
                 <!-- Headline -->
@@ -3254,22 +3616,29 @@ export const ArticleEditor = defineComponent({
                   <input id="ed-cap" v-model="form.imageCaption" placeholder="Describe the image for accessibility and credit" />
                 </div>
 
-                <!-- Staff flags -->
-                <div v-if="isStaff" class="editor-panel" style="margin-bottom:var(--s5);">
-                  <div class="editor-panel-title">Story Flags</div>
+                <!-- Story flags -->
+                <div class="editor-panel" style="margin-bottom:var(--s5);">
+                  <div class="editor-panel-title">Story Attributes & Special Modes</div>
                   <div class="editor-panel-body" style="padding:var(--s2) var(--s4);">
-                    <label class="toggle-field">
+                    <label v-if="isStaff" class="toggle-field">
                       <input type="checkbox" v-model="form.isBreaking" />
                       <div>
                         <div class="toggle-field-label"><i class="fa-solid fa-bolt" aria-hidden="true" style="color:var(--red);margin-right:4px;"></i> Breaking News</div>
-                        <div class="toggle-field-desc">Shows in the breaking news ticker at the top of the site.</div>
+                        <div class="toggle-field-desc">Highlights in the breaking news ticker banner.</div>
                       </div>
                     </label>
-                    <label class="toggle-field">
+                    <label v-if="isStaff" class="toggle-field">
                       <input type="checkbox" v-model="form.isFeatured" />
                       <div>
                         <div class="toggle-field-label"><i class="fa-solid fa-star" aria-hidden="true" style="color:var(--accent);margin-right:4px;"></i> Featured Story</div>
-                        <div class="toggle-field-desc">Shows in the homepage hero section.</div>
+                        <div class="toggle-field-desc">Positions at the top of the homepage hero.</div>
+                      </div>
+                    </label>
+                    <label class="toggle-field">
+                      <input type="checkbox" v-model="form.isLive" />
+                      <div>
+                        <div class="toggle-field-label"><i class="fa-solid fa-tower-broadcast" style="color:#ef4444;margin-right:4px;"></i> Developing Live Blog Mode</div>
+                        <div class="toggle-field-desc">Enables timestamped live micro-updates stream and pulsing live badge.</div>
                       </div>
                     </label>
                   </div>
@@ -3282,7 +3651,7 @@ export const ArticleEditor = defineComponent({
                 <div class="form-actions">
                   <button class="btn" type="submit" :disabled="loading">
                     <i :class="loading ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-floppy-disk'" aria-hidden="true"></i>
-                    {{ loading ? 'Saving\u2026' : 'Save Draft' }}
+                    {{ loading ? 'Saving\u2026' : 'Save Story' }}
                   </button>
                   <button v-if="!isNew && form.id && (form.status==='DRAFT'||form.status==='REVISION_REQUIRED')" type="button" class="btn ghost" :disabled="loading" @click="doAction('submit')">
                     <i class="fa-solid fa-paper-plane" aria-hidden="true"></i> Submit for Review
@@ -3290,8 +3659,11 @@ export const ArticleEditor = defineComponent({
                   <button v-if="!isNew && form.id && isStaff && form.status==='IN_REVIEW'" type="button" class="btn ghost" :disabled="loading" @click="doAction('approve')">
                     <i class="fa-solid fa-check" aria-hidden="true"></i> Approve
                   </button>
-                  <button v-if="!isNew && form.id && isStaff && (form.status==='APPROVED'||form.status==='IN_REVIEW')" type="button" class="btn accent" :disabled="loading" @click="doAction('publish')">
-                    <i class="fa-solid fa-cloud-arrow-up" aria-hidden="true"></i> Publish
+                  <button v-if="!isNew && form.id && isStaff && (form.status==='APPROVED'||form.status==='IN_REVIEW'||form.status==='DRAFT')" type="button" class="btn ghost" style="color:#0284c7;" :disabled="loading" @click="openScheduleModal">
+                    <i class="fa-solid fa-calendar-days"></i> Schedule Publish
+                  </button>
+                  <button v-if="!isNew && form.id && isStaff && (form.status==='APPROVED'||form.status==='IN_REVIEW'||form.status==='SCHEDULED')" type="button" class="btn accent" :disabled="loading" @click="doAction('publish')">
+                    <i class="fa-solid fa-cloud-arrow-up" aria-hidden="true"></i> Publish Now
                   </button>
                   <button v-if="!isNew && form.id && isStaff && form.status==='PUBLISHED'" type="button" class="btn ghost" :disabled="loading" @click="doAction('unpublish')">
                     <i class="fa-solid fa-cloud-arrow-down" aria-hidden="true"></i> Unpublish
@@ -3307,14 +3679,101 @@ export const ArticleEditor = defineComponent({
 
         <!-- Sidebar panels -->
         <div class="editor-sidebar">
-          <!-- Status -->
+          <!-- Status & Scheduled Date -->
           <div class="editor-panel" v-if="!isNew">
-            <div class="editor-panel-title">Status</div>
+            <div class="editor-panel-title">Workflow Status</div>
             <div class="editor-panel-body">
               <div class="status-display">
                 <span style="font-size:var(--text-sm);color:var(--ink-3);">Current status</span>
                 <span :class="'badge status-'+form.status">{{ form.status.replace(/_/g,' ') }}</span>
               </div>
+              <div v-if="form.status === 'SCHEDULED' && form.scheduledPublishAt" style="margin-top:10px;font-size:0.82rem;color:#0284c7;background:#f0f9ff;padding:8px;border-radius:4px;">
+                <i class="fa-regular fa-clock"></i> Goes live: <strong>{{ new Date(form.scheduledPublishAt).toLocaleString('en-NG') }} WAT</strong>
+              </div>
+            </div>
+          </div>
+
+          <!-- Reader Engagement Heatmap -->
+          <div class="editor-panel" v-if="heatmap">
+            <div class="editor-panel-title"><i class="fa-solid fa-chart-simple" style="color:var(--accent);"></i> Reader Scroll Heatmap</div>
+            <div class="editor-panel-body" style="font-size:0.85rem;">
+              <div style="margin-bottom:8px;color:#64748b;">Completion rates across <strong>{{ heatmap.totalViews }}</strong> readers:</div>
+              <div style="display:flex;flex-direction:column;gap:6px;">
+                <div>
+                  <div style="display:flex;justify-content:space-between;margin-bottom:2px;">
+                    <span>25% Scroll (Lead & Intro)</span>
+                    <strong>{{ heatmap.percentages[25] }}%</strong>
+                  </div>
+                  <div style="height:6px;background:#e2e8f0;border-radius:3px;overflow:hidden;">
+                    <div :style="{ width: heatmap.percentages[25] + '%' }" style="height:100%;background:#38bdf8;"></div>
+                  </div>
+                </div>
+                <div>
+                  <div style="display:flex;justify-content:space-between;margin-bottom:2px;">
+                    <span>50% Scroll (Mid-Article)</span>
+                    <strong>{{ heatmap.percentages[50] }}%</strong>
+                  </div>
+                  <div style="height:6px;background:#e2e8f0;border-radius:3px;overflow:hidden;">
+                    <div :style="{ width: heatmap.percentages[50] + '%' }" style="height:100%;background:#0284c7;"></div>
+                  </div>
+                </div>
+                <div>
+                  <div style="display:flex;justify-content:space-between;margin-bottom:2px;">
+                    <span>75% Scroll (Context & Reactions)</span>
+                    <strong>{{ heatmap.percentages[75] }}%</strong>
+                  </div>
+                  <div style="height:6px;background:#e2e8f0;border-radius:3px;overflow:hidden;">
+                    <div :style="{ width: heatmap.percentages[75] + '%' }" style="height:100%;background:#4f46e5;"></div>
+                  </div>
+                </div>
+                <div>
+                  <div style="display:flex;justify-content:space-between;margin-bottom:2px;">
+                    <span>100% Scroll (Full Read)</span>
+                    <strong>{{ heatmap.percentages[100] }}%</strong>
+                  </div>
+                  <div style="height:6px;background:#e2e8f0;border-radius:3px;overflow:hidden;">
+                    <div :style="{ width: heatmap.percentages[100] + '%' }" style="height:100%;background:#16a34a;"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Collaborative Editorial Notes -->
+          <div class="editor-panel" v-if="!isNew && form.id">
+            <div class="editor-panel-title" style="display:flex;justify-content:space-between;align-items:center;">
+              <span><i class="fa-solid fa-comments" style="color:var(--accent);"></i> Editorial Review Notes</span>
+              <span class="badge" style="background:#e2e8f0;color:#334155;">{{ notes.length }}</span>
+            </div>
+            <div class="editor-panel-body" style="padding:var(--s3);">
+              <!-- Post Note Input -->
+              <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px;">
+                <textarea v-model="newNoteText" placeholder="Leave review feedback or correction note..." rows="2" class="form-input" style="font-size:0.85rem;resize:vertical;"></textarea>
+                <button type="button" class="btn btn-sm accent" :disabled="addingNote || !newNoteText.trim()" @click="addNote">
+                  <i class="fa-solid fa-paper-plane"></i> {{ addingNote ? 'Adding...' : 'Post Note' }}
+                </button>
+              </div>
+
+              <!-- Notes list -->
+              <div v-if="notes.length" style="display:flex;flex-direction:column;gap:8px;max-height:260px;overflow-y:auto;">
+                <div v-for="n in notes" :key="n.id" style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:8px 10px;font-size:0.82rem;" :style="{ opacity: n.resolved ? 0.6 : 1 }">
+                  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                    <strong style="color:#0f172a;">{{ n.user?.name || 'Staff' }}</strong>
+                    <span style="color:#94a3b8;font-size:0.75rem;">{{ timeAgo(n.createdAt) }}</span>
+                  </div>
+                  <div style="color:#334155;line-height:1.4;" :style="{ textDecoration: n.resolved ? 'line-through' : 'none' }">{{ n.content }}</div>
+                  <div style="display:flex;gap:6px;margin-top:6px;align-items:center;">
+                    <button type="button" class="btn ghost btn-xs" @click="toggleResolveNote(n)" :title="n.resolved ? 'Reopen note' : 'Mark as resolved'">
+                      <i :class="n.resolved ? 'fa-solid fa-arrow-rotate-left' : 'fa-solid fa-check'" :style="{ color: n.resolved ? '#0284c7' : '#16a34a' }"></i>
+                      <span>{{ n.resolved ? 'Reopen' : 'Resolve' }}</span>
+                    </button>
+                    <button type="button" class="btn ghost btn-xs text-danger" @click="deleteNote(n.id)" style="margin-left:auto;">
+                      <i class="fa-solid fa-trash-can"></i>
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div v-else style="color:#94a3b8;font-size:0.8rem;text-align:center;padding:8px 0;">No editorial notes yet.</div>
             </div>
           </div>
 
@@ -3326,23 +3785,389 @@ export const ArticleEditor = defineComponent({
               <div v-if="form.imageCaption" style="padding:var(--s2) var(--s4);font-size:var(--text-xs);color:var(--ink-3);">{{ form.imageCaption }}</div>
             </div>
           </div>
+        </div>
+      </div>
 
-          <!-- Tips -->
-          <div class="editor-panel">
-            <div class="editor-panel-title">Writing Tips</div>
-            <div class="editor-panel-body">
-              <ul style="font-size:var(--text-xs);color:var(--ink-3);padding-left:16px;line-height:1.7;">
-                <li>Use a clear, specific headline that answers who/what/where.</li>
-                <li>Keep the dek to 1&ndash;2 sentences summarising the story.</li>
-                <li>Use &lt;h2&gt; tags for section breaks in long articles.</li>
-                <li>Use &lt;blockquote&gt; tags for pull quotes.</li>
-                <li>Credit image sources in the caption field.</li>
-              </ul>
+      <!-- Revision History Modal / Visual Diff -->
+      <div v-if="showRevisionsModal" class="modal-overlay" @click.self="showRevisionsModal=false">
+        <div class="modal-card" style="max-width:760px;width:95%;max-height:85vh;display:flex;flex-direction:column;">
+          <div class="modal-header" style="display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid #e2e8f0;">
+            <h3 style="margin:0;font-size:1.15rem;"><i class="fa-solid fa-clock-rotate-left" style="color:var(--accent);"></i> Article Version Snapshots</h3>
+            <button class="btn ghost btn-sm" @click="showRevisionsModal=false"><i class="fa-solid fa-xmark"></i></button>
+          </div>
+          <div class="modal-body" style="padding:20px;overflow-y:auto;flex:1;">
+            <div v-if="loadingRevisions" style="text-align:center;padding:24px;">
+              <i class="fa-solid fa-spinner fa-spin fa-2x"></i>
             </div>
+            <div v-else-if="!revisions.length" style="text-align:center;padding:24px;color:#64748b;">
+              No revision snapshots recorded yet. Snapshots are created automatically when edits are saved.
+            </div>
+            <div v-else style="display:flex;flex-direction:column;gap:12px;">
+              <div v-for="rev in revisions" :key="rev.id" style="border:1px solid #e2e8f0;border-radius:8px;padding:14px;background:#f8fafc;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                  <div>
+                    <strong>Snapshot #{{ rev.id }}</strong> by <span style="color:#0284c7;">{{ rev.user?.name || 'Editor' }}</span>
+                    <span style="color:#94a3b8;font-size:0.8rem;margin-left:8px;">{{ new Date(rev.createdAt).toLocaleString('en-NG') }}</span>
+                  </div>
+                  <button class="btn btn-sm accent" @click="rollbackToRevision(rev)">
+                    <i class="fa-solid fa-rotate-left"></i> Restore Version
+                  </button>
+                </div>
+                <div style="font-weight:600;font-size:0.95rem;color:#0f172a;margin-bottom:4px;">{{ rev.title }}</div>
+                <div style="font-size:0.85rem;color:#475569;margin-bottom:8px;" v-if="rev.excerpt">{{ rev.excerpt }}</div>
+                <div style="font-size:0.78rem;color:#64748b;background:#fff;border:1px solid #e2e8f0;border-radius:4px;padding:8px;max-height:90px;overflow-y:auto;white-space:pre-wrap;">
+                  {{ rev.content.replace(/<[^>]*>/g, ' ').slice(0, 300) }}...
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Schedule Publication Modal -->
+      <div v-if="showScheduleModal" class="modal-overlay" @click.self="showScheduleModal=false">
+        <div class="modal-card" style="max-width:440px;width:95%;">
+          <div class="modal-header" style="display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid #e2e8f0;">
+            <h3 style="margin:0;font-size:1.15rem;"><i class="fa-solid fa-calendar-days" style="color:#0284c7;"></i> Schedule Publication</h3>
+            <button class="btn ghost btn-sm" @click="showScheduleModal=false"><i class="fa-solid fa-xmark"></i></button>
+          </div>
+          <div class="modal-body" style="padding:20px;">
+            <p style="font-size:0.9rem;color:#475569;margin-bottom:16px;">
+              Select the future date and time for this article to be published automatically to the public homepage and RSS feeds.
+            </p>
+            <div class="field">
+              <label>Publication Date & Time (WAT)</label>
+              <input type="datetime-local" v-model="scheduledDate" class="form-input" style="width:100%;font-size:1rem;" />
+              <div style="font-size:0.78rem;color:#64748b;margin-top:4px;">West Africa Time (UTC+1)</div>
+            </div>
+            <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:20px;">
+              <button class="btn ghost" @click="showScheduleModal=false">Cancel</button>
+              <button class="btn accent" :disabled="scheduling || !scheduledDate" @click="schedulePublish">
+                <i class="fa-solid fa-calendar-check"></i> {{ scheduling ? 'Scheduling...' : 'Confirm Schedule' }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </dash-shell>
+  `,
+  components: { DashShell, ImageUploader },
+});
+
+// -----------------------------------------------------------------------
+// ADMIN SPONSORED ADS & MONETIZATION MANAGER
+// -----------------------------------------------------------------------
+export const AdminAds = defineComponent({
+  setup() {
+    const ads          = ref([]);
+    const loading      = ref(true);
+    const saving       = ref(false);
+    const showModal    = ref(false);
+    const editingId    = ref(null);
+    const activeFilter = ref('ALL');
+
+    const form = reactive({
+      title: '',
+      sponsorName: '',
+      placement: 'HEADER_LEADERBOARD',
+      imageUrl: '',
+      targetUrl: '',
+      active: true,
+      startDate: '',
+      endDate: '',
+    });
+
+    const fetchAds = async () => {
+      loading.value = true;
+      try {
+        const res = await api.get('/api/admin/ads');
+        ads.value = res.items || [];
+      } catch (e) {
+        notify.error('Failed to load ads: ' + e.message);
+      } finally {
+        loading.value = false;
+      }
+    };
+
+    onMounted(fetchAds);
+
+    const stats = computed(() => {
+      const total = ads.value.length;
+      const active = ads.value.filter(a => a.active).length;
+      const impressions = ads.value.reduce((acc, a) => acc + (a.impressions || 0), 0);
+      const clicks = ads.value.reduce((acc, a) => acc + (a.clicks || 0), 0);
+      const ctr = impressions > 0 ? ((clicks / impressions) * 100).toFixed(2) : '0.00';
+      return { total, active, impressions, clicks, ctr };
+    });
+
+    const filteredAds = computed(() => {
+      if (activeFilter.value === 'ALL') return ads.value;
+      return ads.value.filter(a => a.placement === activeFilter.value);
+    });
+
+    const openCreateModal = () => {
+      editingId.value = null;
+      Object.assign(form, {
+        title: '',
+        sponsorName: '',
+        placement: 'HEADER_LEADERBOARD',
+        imageUrl: '',
+        targetUrl: '',
+        active: true,
+        startDate: '',
+        endDate: '',
+      });
+      showModal.value = true;
+    };
+
+    const editAd = (ad) => {
+      editingId.value = ad.id;
+      Object.assign(form, {
+        title: ad.title,
+        sponsorName: ad.sponsorName,
+        placement: ad.placement,
+        imageUrl: ad.imageUrl,
+        targetUrl: ad.targetUrl,
+        active: ad.active,
+        startDate: ad.startDate ? ad.startDate.slice(0, 10) : '',
+        endDate: ad.endDate ? ad.endDate.slice(0, 10) : '',
+      });
+      showModal.value = true;
+    };
+
+    const saveAd = async () => {
+      if (!form.title || !form.sponsorName || !form.imageUrl || !form.targetUrl) {
+        notify.warn('Missing required fields', 'Title, sponsor, image URL and target URL are required.');
+        return;
+      }
+      saving.value = true;
+      try {
+        if (editingId.value) {
+          await api.put(`/api/admin/ads/${editingId.value}`, form);
+          notify.success('Ad Updated', 'Sponsored banner updated successfully.');
+        } else {
+          await api.post('/api/admin/ads', form);
+          notify.success('Ad Created', 'New sponsored campaign launched.');
+        }
+        showModal.value = false;
+        await fetchAds();
+      } catch (e) {
+        notify.error('Error saving ad: ' + e.message);
+      } finally {
+        saving.value = false;
+      }
+    };
+
+    const toggleActive = async (ad) => {
+      try {
+        await api.put(`/api/admin/ads/${ad.id}`, { active: !ad.active });
+        ad.active = !ad.active;
+        notify.success(`Campaign ${ad.active ? 'Activated' : 'Paused'}`);
+      } catch (e) {
+        notify.error(e.message);
+      }
+    };
+
+    const deleteAd = async (ad) => {
+      if (!confirm(`Delete campaign "${ad.title}"?`)) return;
+      try {
+        await api.delete(`/api/admin/ads/${ad.id}`);
+        await fetchAds();
+        notify.success('Campaign deleted.');
+      } catch (e) {
+        notify.error(e.message);
+      }
+    };
+
+    return {
+      ads, loading, saving, showModal, editingId, activeFilter, form,
+      stats, filteredAds, openCreateModal, editAd, saveAd, toggleActive, deleteAd,
+    };
+  },
+  template: `
+    <dash-shell title="Sponsored Content & Ads">
+      <!-- Performance Metrics Cards -->
+      <div class="aggregator-stats-grid" style="margin-bottom:var(--s6);">
+        <div class="agg-metric-card">
+          <div class="metric-icon" style="background:#e0f2fe;color:#0284c7;"><i class="fa-solid fa-rectangle-ad"></i></div>
+          <div class="metric-data">
+            <div class="metric-num">{{ stats.total }}</div>
+            <div class="metric-lbl">Total Campaigns</div>
+          </div>
+        </div>
+        <div class="agg-metric-card">
+          <div class="metric-icon" style="background:#dcfce7;color:#16a34a;"><i class="fa-solid fa-circle-play"></i></div>
+          <div class="metric-data">
+            <div class="metric-num">{{ stats.active }}</div>
+            <div class="metric-lbl">Active Now</div>
+          </div>
+        </div>
+        <div class="agg-metric-card">
+          <div class="metric-icon" style="background:#fef3c7;color:#d97706;"><i class="fa-solid fa-eye"></i></div>
+          <div class="metric-data">
+            <div class="metric-num">{{ stats.impressions.toLocaleString() }}</div>
+            <div class="metric-lbl">Impressions</div>
+          </div>
+        </div>
+        <div class="agg-metric-card">
+          <div class="metric-icon" style="background:#e0e7ff;color:#4f46e5;"><i class="fa-solid fa-arrow-pointer"></i></div>
+          <div class="metric-data">
+            <div class="metric-num">{{ stats.clicks.toLocaleString() }}</div>
+            <div class="metric-lbl">Total Clicks</div>
+          </div>
+        </div>
+        <div class="agg-metric-card">
+          <div class="metric-icon" style="background:#f3e8ff;color:#9333ea;"><i class="fa-solid fa-percent"></i></div>
+          <div class="metric-data">
+            <div class="metric-num">{{ stats.ctr }}%</div>
+            <div class="metric-lbl">Overall CTR</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Action Toolbar -->
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s4);flex-wrap:wrap;gap:12px;">
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-sm" :class="activeFilter==='ALL' ? 'accent' : 'ghost'" @click="activeFilter='ALL'">All Placements</button>
+          <button class="btn btn-sm" :class="activeFilter==='HEADER_LEADERBOARD' ? 'accent' : 'ghost'" @click="activeFilter='HEADER_LEADERBOARD'">Leaderboard (Header)</button>
+          <button class="btn btn-sm" :class="activeFilter==='IN_ARTICLE' ? 'accent' : 'ghost'" @click="activeFilter='IN_ARTICLE'">Mid-Article Banner</button>
+          <button class="btn btn-sm" :class="activeFilter==='SIDEBAR_STICKY' ? 'accent' : 'ghost'" @click="activeFilter='SIDEBAR_STICKY'">Sidebar Sticky</button>
+        </div>
+
+        <button class="btn accent btn-sm" @click="openCreateModal">
+          <i class="fa-solid fa-circle-plus"></i> New Ad Campaign
+        </button>
+      </div>
+
+      <!-- Ads Table -->
+      <div v-if="loading" class="state-block">
+        <div class="state-icon"><i class="fa-solid fa-spinner fa-spin"></i></div>
+        <p>Loading campaigns...</p>
+      </div>
+      <div v-else-if="!filteredAds.length" class="state-block">
+        <div class="state-icon"><i class="fa-solid fa-rectangle-ad"></i></div>
+        <h3>No ad campaigns found</h3>
+        <p>Create native sponsored placements to monetize content without slow external ad networks.</p>
+        <button class="btn accent" style="margin-top:12px;" @click="openCreateModal"><i class="fa-solid fa-plus"></i> Create First Campaign</button>
+      </div>
+      <div v-else class="table-wrap">
+        <table aria-label="Ad campaigns">
+          <thead>
+            <tr>
+              <th>Banner</th>
+              <th>Campaign & Sponsor</th>
+              <th>Placement</th>
+              <th>Impressions</th>
+              <th>Clicks</th>
+              <th>CTR</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="ad in filteredAds" :key="ad.id">
+              <td style="width:80px;">
+                <img :src="ad.imageUrl" :alt="ad.title" style="width:70px;height:42px;object-fit:cover;border-radius:4px;border:1px solid #e2e8f0;" />
+              </td>
+              <td>
+                <div style="font-weight:600;color:#0f172a;">{{ ad.title }}</div>
+                <div style="font-size:0.8rem;color:#64748b;">Sponsor: <strong>{{ ad.sponsorName }}</strong></div>
+              </td>
+              <td>
+                <span class="badge" :style="{
+                  background: ad.placement==='HEADER_LEADERBOARD' ? '#e0f2fe' : ad.placement==='IN_ARTICLE' ? '#ecfdf5' : '#fef3c7',
+                  color: ad.placement==='HEADER_LEADERBOARD' ? '#0369a1' : ad.placement==='IN_ARTICLE' ? '#047857' : '#b45309'
+                }">
+                  {{ ad.placement.replace(/_/g, ' ') }}
+                </span>
+              </td>
+              <td>{{ ad.impressions.toLocaleString() }}</td>
+              <td>{{ ad.clicks.toLocaleString() }}</td>
+              <td>
+                <strong style="color:var(--accent);">
+                  {{ ad.impressions > 0 ? ((ad.clicks / ad.impressions) * 100).toFixed(2) : '0.00' }}%
+                </strong>
+              </td>
+              <td>
+                <button class="btn ghost btn-xs" @click="toggleActive(ad)" :style="{ color: ad.active ? '#16a34a' : '#94a3b8' }">
+                  <i :class="ad.active ? 'fa-solid fa-circle-check' : 'fa-solid fa-circle-pause'"></i>
+                  {{ ad.active ? 'Active' : 'Paused' }}
+                </button>
+              </td>
+              <td>
+                <div class="action-btns">
+                  <button class="icon-btn" @click="editAd(ad)" title="Edit Campaign"><i class="fa-solid fa-pen"></i></button>
+                  <a :href="ad.targetUrl" target="_blank" rel="noopener noreferrer" class="icon-btn blue" title="Test Link"><i class="fa-solid fa-arrow-up-right-from-square"></i></a>
+                  <button class="icon-btn danger" @click="deleteAd(ad)" title="Delete"><i class="fa-solid fa-trash-can"></i></button>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Create / Edit Ad Modal -->
+      <div v-if="showModal" class="modal-overlay" @click.self="showModal=false">
+        <div class="modal-card" style="max-width:540px;width:95%;">
+          <div class="modal-header" style="display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid #e2e8f0;">
+            <h3 style="margin:0;font-size:1.15rem;">{{ editingId ? 'Edit Ad Campaign' : 'Create Native Sponsored Ad' }}</h3>
+            <button class="btn ghost btn-sm" @click="showModal=false"><i class="fa-solid fa-xmark"></i></button>
+          </div>
+          <div class="modal-body" style="padding:20px;">
+            <form @submit.prevent="saveAd" style="display:flex;flex-direction:column;gap:14px;">
+              <div class="field">
+                <label>Campaign Title <span style="color:var(--red);">*</span></label>
+                <input v-model="form.title" class="form-input" required placeholder="e.g. Jigawa AgriTech Modern Tractors" />
+              </div>
+              <div class="form-two-col">
+                <div class="field">
+                  <label>Sponsor Name <span style="color:var(--red);">*</span></label>
+                  <input v-model="form.sponsorName" class="form-input" required placeholder="e.g. Jigawa AgriTech Ltd" />
+                </div>
+                <div class="field">
+                  <label>Ad Placement <span style="color:var(--red);">*</span></label>
+                  <select v-model="form.placement" class="form-select" required>
+                    <option value="HEADER_LEADERBOARD">Header Leaderboard (Top)</option>
+                    <option value="IN_ARTICLE">In-Article (Mid-Story)</option>
+                    <option value="SIDEBAR_STICKY">Sidebar Sticky Widget</option>
+                  </select>
+                </div>
+              </div>
+              <div class="field">
+                <label>Banner Image URL <span style="color:var(--red);">*</span></label>
+                <input v-model="form.imageUrl" class="form-input" required placeholder="https://..." />
+              </div>
+              <div class="field">
+                <label>Destination Target URL <span style="color:var(--red);">*</span></label>
+                <input v-model="form.targetUrl" class="form-input" required placeholder="https://..." />
+              </div>
+              <div class="form-two-col">
+                <div class="field">
+                  <label>Start Date (Optional)</label>
+                  <input type="date" v-model="form.startDate" class="form-input" />
+                </div>
+                <div class="field">
+                  <label>End Date (Optional)</label>
+                  <input type="date" v-model="form.endDate" class="form-input" />
+                </div>
+              </div>
+              <label style="display:flex;align-items:center;gap:8px;font-size:0.9rem;cursor:pointer;">
+                <input type="checkbox" v-model="form.active" /> <strong>Campaign is Active</strong>
+              </label>
+              <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:10px;">
+                <button type="button" class="btn ghost" @click="showModal=false">Cancel</button>
+                <button type="submit" class="btn accent" :disabled="saving">
+                  <i :class="saving ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-floppy-disk'"></i>
+                  {{ saving ? 'Saving...' : 'Save Campaign' }}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       </div>
     </dash-shell>
   `,
-  components: { DashShell, ImageUploader },
+  components: { DashShell },
 });
+

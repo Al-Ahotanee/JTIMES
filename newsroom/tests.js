@@ -60,7 +60,7 @@ test('parses valid RSS feed with CDATA', () => {
         <title><![CDATA[Jigawa Approves New Agricultural Programme]]></title>
         <link>https://example.com/story-1</link>
         <description><![CDATA[Farmers benefit from new scheme.]]></description>
-        <pubDate>Wed, 10 Sep 2026 08:00:00 GMT</pubDate>
+        <pubDate>${new Date().toUTCString()}</pubDate>
         <dc:creator>NAN Reporter</dc:creator>
       </item>
     </channel></rss>`;

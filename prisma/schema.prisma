@@ -30,6 +30,7 @@ enum ArticleStatus {
   IN_REVIEW
   REVISION_REQUIRED
   APPROVED
+  SCHEDULED
   PUBLISHED
   ARCHIVED
 }
@@ -48,6 +49,9 @@ model User {
 
   articles          Article[]
   editorialActions  EditorialAction[]
+  editorialComments EditorialComment[]
+  liveUpdates       LiveUpdate[]
+  revisions         ArticleRevision[]
 }
 
 model Category {
@@ -63,35 +67,43 @@ model Category {
 }
 
 model Article {
-  id             Int           @id @default(autoincrement())
-  title          String
-  slug           String        @unique
-  excerpt        String?
-  content        String
-  featuredImage  String?
-  imageCaption   String?
-  status         ArticleStatus @default(DRAFT)
-  isBreaking     Boolean       @default(false)
-  isFeatured     Boolean       @default(false)
-  authorId       Int
-  categoryId     Int
-  views          Int           @default(0)
-  publishedAt    DateTime?
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
+  id                 Int           @id @default(autoincrement())
+  title              String
+  slug               String        @unique
+  excerpt            String?
+  content            String
+  featuredImage      String?
+  imageCaption       String?
+  status             ArticleStatus @default(DRAFT)
+  isBreaking         Boolean       @default(false)
+  isFeatured         Boolean       @default(false)
+  isLive             Boolean       @default(false) @map("is_live")
+  scheduledPublishAt DateTime?     @map("scheduled_publish_at")
+  authorId           Int
+  categoryId         Int
+  views              Int           @default(0)
+  publishedAt        DateTime?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
 
-  author           User              @relation(fields: [authorId], references: [id])
-  category         Category          @relation(fields: [categoryId], references: [id])
-  tags             ArticleTag[]
-  comments         Comment[]
-  editorialActions EditorialAction[]
-  newsroomItems    NewsroomItem[]
+  author            User                 @relation(fields: [authorId], references: [id])
+  category          Category             @relation(fields: [categoryId], references: [id])
+  tags              ArticleTag[]
+  comments          Comment[]
+  editorialActions  EditorialAction[]
+  newsroomItems     NewsroomItem[]
+  revisions         ArticleRevision[]
+  editorialComments EditorialComment[]
+  liveUpdates       LiveUpdate[]
+  readingStats      ArticleReadingStat[]
 
   @@index([status])
   @@index([publishedAt])
+  @@index([scheduledPublishAt])
   @@index([categoryId])
   @@index([authorId])
   @@index([views])
+  @@index([isLive])
 }
 
 model Tag {
@@ -139,6 +151,91 @@ model EditorialAction {
 
   @@index([articleId])
 }
+
+// ---------------------------------------------------------------------
+// Enterprise Models: Native Ads, Revisions, Notes, Live-Blog, Heatmap
+// ---------------------------------------------------------------------
+
+model Ad {
+  id          Int       @id @default(autoincrement())
+  title       String
+  sponsorName String    @map("sponsor_name")
+  placement   String    // HEADER_LEADERBOARD, IN_ARTICLE, SIDEBAR_STICKY
+  imageUrl    String    @map("image_url")
+  targetUrl   String    @map("target_url")
+  active      Boolean   @default(true)
+  impressions Int       @default(0)
+  clicks      Int       @default(0)
+  startDate   DateTime? @map("start_date")
+  endDate     DateTime? @map("end_date")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([placement, active])
+  @@map("ads")
+}
+
+model ArticleRevision {
+  id        Int      @id @default(autoincrement())
+  articleId Int      @map("article_id")
+  userId    Int      @map("user_id")
+  title     String
+  excerpt   String?
+  content   String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  article Article @relation(fields: [articleId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([articleId])
+  @@map("article_revisions")
+}
+
+model EditorialComment {
+  id        Int      @id @default(autoincrement())
+  articleId Int      @map("article_id")
+  userId    Int      @map("user_id")
+  content   String
+  resolved  Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  article Article @relation(fields: [articleId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([articleId])
+  @@map("editorial_comments")
+}
+
+model LiveUpdate {
+  id          Int      @id @default(autoincrement())
+  articleId   Int      @map("article_id")
+  authorId    Int      @map("author_id")
+  title       String?
+  content     String
+  isPinned    Boolean  @default(false) @map("is_pinned")
+  publishedAt DateTime @default(now()) @map("published_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  article Article @relation(fields: [articleId], references: [id], onDelete: Cascade)
+  author  User    @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([articleId, publishedAt])
+  @@map("live_updates")
+}
+
+model ArticleReadingStat {
+  id        Int      @id @default(autoincrement())
+  articleId Int      @map("article_id")
+  milestone Int      // 25, 50, 75, 100
+  createdAt DateTime @default(now()) @map("created_at")
+
+  article Article @relation(fields: [articleId], references: [id], onDelete: Cascade)
+
+  @@index([articleId, milestone])
+  @@map("article_reading_stats")
+}
+
 
 model SiteSetting {
   id        Int      @id @default(autoincrement())

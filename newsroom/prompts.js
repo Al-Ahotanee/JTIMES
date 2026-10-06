@@ -305,6 +305,51 @@ Return JSON with EXACTLY these fields:
 }
 `.trim();
 
+// ---------------------------------------------------------------------------
+// 8. MULTI-SOURCE STORY CORROBORATION & FACT MERGING PROMPT
+// Synthesizes multiple independent source reports covering the same event into
+// a single authoritative deep-dive article with a cross-source fact matrix.
+// ---------------------------------------------------------------------------
+const MULTI_SOURCE_CORROBORATION_PROMPT = (items) => `
+You are a chief investigative editor and fact-checker at Jigawa Times.
+You have been provided news dispatches from multiple independent sources covering the same development or story.
+
+SOURCES:
+${items.map((it, idx) => `
+[SOURCE ${idx + 1}]: ${it.sourceName || 'Agency'}
+Title: ${it.sourceTitle || it.title || 'Untitled'}
+Date: ${it.publishedAt || 'Recent'}
+URL: ${it.sourceUrl || 'N/A'}
+Excerpt / Content:
+${(it.rawData?.snippet || it.content || it.sourceTitle || '').slice(0, 1500)}
+`).join('\n---\n')}
+
+YOUR TASK:
+1. Cross-examine all source reports to isolate verified core facts versus single-source claims or discrepancies.
+2. Synthesize an authoritative, exhaustive, high-impact news report (minimum 7 to 10 paragraphs) written in authentic human journalistic prose that merges all valid angles without plagiarizing any source.
+3. Build a structured fact matrix, confidence rating (0.0 to 1.0), and angle comparison.
+
+ANTI-PLAGIARISM & FACT INTEGRITY RULES:
+- Strictly do NOT copy sentences verbatim from any source. Completely rephrase and restructure in polished newspaper English.
+- Do NOT hallucinate figures, names, or quotes. Retain genuine corroborated facts.
+- Include a designated <h3>Multi-Source Corroboration Matrix</h3> section in the article body outlining consensus points and distinct source claims.
+
+Return JSON with EXACTLY these fields:
+{
+  "title": string (strong, original, non-plagiarized headline),
+  "excerpt": string (2-sentence executive summary),
+  "content": string (comprehensive HTML article with <h3> subheadings, <blockquote> quotes, <strong> emphasis, narrative transitions, and a Corroboration Fact Matrix section),
+  "category": "buji" | "jigawa" | "politics" | "business" | "education" | "investigations",
+  "tags": [string, string, string, string],
+  "confidenceScore": number (0.0 to 1.0),
+  "corroboratedFacts": [string],
+  "conflictsOrDivergences": [string],
+  "sourcesAttribution": [string],
+  "imagePrompt": string (safe 16:9 editorial concept description without fake faces),
+  "imageCaption": string
+}
+`.trim();
+
 module.exports = {
   CLASSIFY_PROMPT,
   DUPLICATE_PROMPT,
@@ -313,4 +358,6 @@ module.exports = {
   SEO_PROMPT,
   IMAGE_BRIEF_PROMPT,
   AGGREGATOR_REPHRASE_PROMPT,
+  MULTI_SOURCE_CORROBORATION_PROMPT,
 };
+

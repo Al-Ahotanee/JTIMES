@@ -355,9 +355,91 @@ DO $$ BEGIN
   FOR EACH ROW EXECUTE FUNCTION update_newsroom_updated_at();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- ---------------------------------------------------------------------
+-- 12. ENTERPRISE ENHANCEMENTS: ADS, REVISIONS, EDITORIAL NOTES,
+--     LIVE UPDATES, READING STATS, SCHEDULED PUBLISHING
+-- ---------------------------------------------------------------------
+DO $$ BEGIN
+  ALTER TYPE "ArticleStatus" ADD VALUE IF NOT EXISTS 'SCHEDULED';
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE "Article" ADD COLUMN IF NOT EXISTS "scheduled_publish_at" TIMESTAMPTZ;
+ALTER TABLE "Article" ADD COLUMN IF NOT EXISTS "is_live" BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE INDEX IF NOT EXISTS idx_article_scheduled ON "Article"("scheduled_publish_at");
+CREATE INDEX IF NOT EXISTS idx_article_live ON "Article"("is_live");
+
+CREATE TABLE IF NOT EXISTS "ads" (
+  id            SERIAL PRIMARY KEY,
+  title         TEXT NOT NULL,
+  sponsor_name  TEXT NOT NULL,
+  placement     TEXT NOT NULL,
+  image_url     TEXT NOT NULL,
+  target_url    TEXT NOT NULL,
+  active        BOOLEAN NOT NULL DEFAULT TRUE,
+  impressions   INTEGER NOT NULL DEFAULT 0,
+  clicks        INTEGER NOT NULL DEFAULT 0,
+  start_date    TIMESTAMPTZ,
+  end_date      TIMESTAMPTZ,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_ads_placement_active ON "ads"(placement, active);
+
+CREATE TABLE IF NOT EXISTS "article_revisions" (
+  id          SERIAL PRIMARY KEY,
+  article_id  INTEGER NOT NULL REFERENCES "Article"(id) ON DELETE CASCADE,
+  user_id     INTEGER NOT NULL REFERENCES "User"(id) ON DELETE CASCADE,
+  title       TEXT NOT NULL,
+  excerpt     TEXT,
+  content     TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_article_revisions_article ON "article_revisions"(article_id);
+
+CREATE TABLE IF NOT EXISTS "editorial_comments" (
+  id          SERIAL PRIMARY KEY,
+  article_id  INTEGER NOT NULL REFERENCES "Article"(id) ON DELETE CASCADE,
+  user_id     INTEGER NOT NULL REFERENCES "User"(id) ON DELETE CASCADE,
+  content     TEXT NOT NULL,
+  resolved    BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_editorial_comments_article ON "editorial_comments"(article_id);
+
+CREATE TABLE IF NOT EXISTS "live_updates" (
+  id           SERIAL PRIMARY KEY,
+  article_id   INTEGER NOT NULL REFERENCES "Article"(id) ON DELETE CASCADE,
+  author_id    INTEGER NOT NULL REFERENCES "User"(id) ON DELETE CASCADE,
+  title        TEXT,
+  content      TEXT NOT NULL,
+  is_pinned    BOOLEAN NOT NULL DEFAULT FALSE,
+  published_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_live_updates_article ON "live_updates"(article_id, published_at);
+
+CREATE TABLE IF NOT EXISTS "article_reading_stats" (
+  id          SERIAL PRIMARY KEY,
+  article_id  INTEGER NOT NULL REFERENCES "Article"(id) ON DELETE CASCADE,
+  milestone   INTEGER NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_reading_stats_article ON "article_reading_stats"(article_id, milestone);
+
+-- Seed default sponsored banners
+INSERT INTO "ads" (title, sponsor_name, placement, image_url, target_url, active)
+VALUES
+  ('Empowering Jigawa Agriculture Initiative', 'Jigawa AgriTech', 'HEADER_LEADERBOARD', 'https://images.unsplash.com/photo-1595974482597-4b8da8879bc5?auto=format&fit=crop&w=1200&q=80', 'https://jigawa.gov.ng', TRUE),
+  ('Northern Solar Clean Energy Grant', 'Northern Clean Power', 'IN_ARTICLE', 'https://images.unsplash.com/photo-1509391365360-2e959784a276?auto=format&fit=crop&w=1000&q=80', 'https://jigawa.gov.ng', TRUE),
+  ('Dutse Digital Hub Training Fellowship', 'Dutse Tech Academy', 'SIDEBAR_STICKY', 'https://images.unsplash.com/photo-1531482615713-2afd69097998?auto=format&fit=crop&w=800&q=80', 'https://jigawa.gov.ng', TRUE)
+ON CONFLICT DO NOTHING;
+
 -- =====================================================================
 -- DONE. Verify with:
 --   SELECT role, count(*) FROM "User" GROUP BY role;
 --   SELECT status, count(*) FROM "Article" GROUP BY status;
 --   SELECT count(*) FROM "newsroom_items";
+--   SELECT count(*) FROM "ads";
 -- =====================================================================
+

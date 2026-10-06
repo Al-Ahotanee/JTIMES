@@ -1,4 +1,4 @@
-import { defineComponent, ref, computed } from 'vue';
+import { defineComponent, ref, computed, onMounted } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { store } from './store.js';
 import { api } from './api.js';
@@ -28,8 +28,9 @@ export const ADMIN_NAV = [
   {
     label: 'Content',
     items: [
-      { label: 'Articles',    path: '/admin/articles',    icon: 'fa-solid fa-newspaper' },
-      { label: 'Categories',  path: '/admin/categories',  icon: 'fa-solid fa-tags' },
+      { label: 'Articles',      path: '/admin/articles',    icon: 'fa-solid fa-newspaper' },
+      { label: 'Categories',    path: '/admin/categories',  icon: 'fa-solid fa-tags' },
+      { label: 'Sponsored Ads', path: '/admin/ads',         icon: 'fa-solid fa-rectangle-ad' },
     ],
   },
   {
@@ -630,3 +631,112 @@ export const SiteFooter = defineComponent({
     </footer>
   `,
 });
+
+// -----------------------------------------------------------------------
+// NATIVE SPONSORED CONTENT & AD BANNER
+// -----------------------------------------------------------------------
+export const AdBanner = defineComponent({
+  props: {
+    placement: { type: String, default: 'IN_ARTICLE' }, // HEADER_LEADERBOARD, IN_ARTICLE, SIDEBAR_STICKY
+  },
+  setup(props) {
+    const ad = ref(null);
+    const impressionLogged = ref(false);
+
+    onMounted(async () => {
+      try {
+        const res = await api.get(`/api/ads?placement=${props.placement}`);
+        if (res.items && res.items.length) {
+          ad.value = res.items[Math.floor(Math.random() * res.items.length)];
+          if (ad.value && !impressionLogged.value) {
+            impressionLogged.value = true;
+            api.post(`/api/ads/${ad.value.id}/impression`).catch(() => {});
+          }
+        }
+      } catch {}
+    });
+
+    const handleClick = () => {
+      if (!ad.value) return;
+      api.post(`/api/ads/${ad.value.id}/click`).catch(() => {});
+      if (ad.value.targetUrl) {
+        window.open(ad.value.targetUrl, '_blank', 'noopener,noreferrer');
+      }
+    };
+
+    return { ad, handleClick };
+  },
+  template: `
+    <div v-if="ad" class="native-ad-container" :class="'ad-' + placement.toLowerCase().replace(/_/g, '-')">
+      <div class="ad-label-bar">
+        <span class="ad-badge">SPONSORED</span>
+        <span class="ad-sponsor">{{ ad.sponsorName }}</span>
+      </div>
+      <div class="ad-content-box" @click="handleClick" role="link" tabindex="0">
+        <div class="ad-image-wrap" v-if="ad.imageUrl">
+          <img :src="ad.imageUrl" :alt="ad.title" loading="lazy" />
+        </div>
+        <div class="ad-info">
+          <div class="ad-title">{{ ad.title }}</div>
+          <div class="ad-cta">Learn More <i class="fa-solid fa-arrow-up-right-from-square"></i></div>
+        </div>
+      </div>
+    </div>
+  `,
+});
+
+// -----------------------------------------------------------------------
+// GLOBAL BREAKING & LIVE TICKER
+// -----------------------------------------------------------------------
+export const LiveTicker = defineComponent({
+  setup() {
+    const liveArticles = ref([]);
+    const breakingArticles = ref([]);
+    const currentIndex = ref(0);
+
+    const fetchTicker = async () => {
+      try {
+        const res = await api.get('/api/live/ticker');
+        liveArticles.value = res.liveArticles || [];
+        breakingArticles.value = res.breakingArticles || [];
+      } catch {}
+    };
+
+    onMounted(() => {
+      fetchTicker();
+      const pollId = setInterval(fetchTicker, 45000);
+      const rotateId = setInterval(() => {
+        const total = liveArticles.value.length + breakingArticles.value.length;
+        if (total > 1) {
+          currentIndex.value = (currentIndex.value + 1) % total;
+        }
+      }, 6000);
+    });
+
+    const activeItem = computed(() => {
+      const all = [
+        ...liveArticles.value.map((a) => ({ ...a, type: 'live' })),
+        ...breakingArticles.value.map((a) => ({ ...a, type: 'breaking' })),
+      ];
+      return all[currentIndex.value] || all[0];
+    });
+
+    return { activeItem };
+  },
+  template: `
+    <div v-if="activeItem" class="live-ticker-strip">
+      <div class="container live-ticker-inner">
+        <div class="live-ticker-badge" :class="activeItem.type === 'live' ? 'is-live-pulse' : 'is-breaking'">
+          <span class="pulse-dot" v-if="activeItem.type === 'live'"></span>
+          <i class="fa-solid fa-bolt" v-else></i>
+          <span>{{ activeItem.type === 'live' ? 'LIVE DISPATCH' : 'BREAKING NEWS' }}</span>
+        </div>
+        <router-link :to="'/news/' + activeItem.slug" class="live-ticker-headline">
+          {{ activeItem.title }}
+        </router-link>
+        <router-link :to="'/news/' + activeItem.slug" class="live-ticker-action">Follow Live &rarr;</router-link>
+      </div>
+    </div>
+  `,
+});
+
